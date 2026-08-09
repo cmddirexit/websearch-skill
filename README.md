@@ -416,6 +416,38 @@ import {
 npm run fixtures
 ```
 
+## 开发流程(分支策略)
+
+仓库使用双分支 + PR 保护:
+
+```
+main ──────────────► 稳定版(受保护:禁止直接 push,必须 PR + 1 approve)
+   \                ▲
+    \  merge        │ PR
+     └───► dev ─────┘ 开发/测试分支(新功能先落这里)
+```
+
+流程:
+
+```bash
+# 1. 在 dev 分支开发(默认工作分支)
+git checkout dev && git pull
+# ...开发 + 修改...
+# 2. 本地测试通过(npm test 全绿)后推 dev
+git add -A && git commit -m "..." && git push
+# 3. 建 PR 合并到 main
+gh pr create --base main --head dev --title "..." --body "..."
+gh pr merge --merge   # 会要求 approve(自己 approve: gh pr review --approve)
+# 4. 合并后打 tag
+git checkout main && git pull && git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z
+```
+
+规则:
+- **main 受保护**:直接 `git push origin main` 会被 GitHub 拒绝,必须走 PR
+- 每次合并前必须 `npm test` 全绿(无 CI,靠提交者执行)
+- 版本号语义化 + tag(见 CHANGELOG.md)
+- 紧急修复可直接从 main 切 hotfix 分支,同样走 PR
+
 ## 测试
 
 ```bash
