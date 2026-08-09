@@ -32,6 +32,7 @@ import { judgeResults, judgeText, judgeCacheGet } from "./llm-judge.mjs";
 import { atomicWriteJsonSync } from "./state-file.mjs";
 import { assessContentEvidence } from "./content-evidence.mjs";
 import { assessSemanticEvidence } from "./semantic-evidence.mjs";
+import { contentBayes, bodyTokens } from "./content-bayes.mjs";
 
 // 实例内部使用的纯函数(显式 import,re-export 不创建当前作用域绑定)
 import { clamp, CONTENT_LOW_FLAGS, contributionFromQuality, updateScore, updateFetchScore, updateAvailabilityScore, updateUtilityScore, effectiveScore, availabilityFactor, utilityFactor, decayedScore, repFactor, repBadge, predictTokens, updateMetaTokens, normalizedFeatureVector, metaReady } from "./rep-score.mjs";
@@ -51,7 +52,7 @@ export { ENGINE_DOMAINS, FUNCTIONAL_PATH_SEGS, FUNCTIONAL_PATH_RE, registrableHo
  * 模块单例由调用方创建(cli.mjs),库复用可自建。
  * @param {Object} [opts] @param {string} [opts.file=REP_FILE] 持久化文件
  */
-export function createDomainReputation({ file = REP_FILE } = {}) {
+export function createDomainReputation({ file = REP_FILE, bayes = contentBayes } = {}) {
   const emptyMeta = () => ({ bias: 0, weights: {}, touched: {}, z: {}, n: {}, weightSamples: 0, effectiveSamples: 0, positiveSamples: 0, negativeSamples: 0 });
   let domains = {};
   let meta = emptyMeta();
@@ -402,6 +403,8 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
       // 结构证据模棱两可时,用零词表的标题-正文语义一致性兜底(标题党检测);
       // 语义嵌入不可用(无 key/本地模型)时返回 null,静默降级,不拖慢 fetch。
       if (!evidence) evidence = await assessSemanticEvidence(extra);
+      // 最后兜底:内容级贝叶斯(历史独立标注自举)。未成熟时 predict 返回 null。
+      if (!evidence) evidence = bayes.predictEvidence(bodyTokens(extra.body || extra.markdown));
     }
     if (evidence) {
       const tokens = extractLearnFeatures(url, extra);
@@ -416,6 +419,15 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
         eventKey: `${url}\u0000${bodyHash}`,
         low: evidence.label <= 0.35,
       });
+      // 贝叶斯训练:只用独立证据源(结构/语义/LLM),贝叶斯自身预测不训练自己
+      // (防自反馈循环)。正文 token 与 FTRL 的标题 token 不重叠,互不污染。
+      if (evidence.source !== "bayes-v1") {
+        bayes.learn(bodyTokens(extra.body || extra.markdown), evidence.label, {
+          confidence: evidence.confidence,
+          eventKey: `${url}\u0000${bodyHash}`,
+        });
+        bayes.save();
+      }
     }
     return evidence;
   }

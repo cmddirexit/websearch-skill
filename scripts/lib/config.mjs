@@ -265,3 +265,13 @@ export const META_TRUST_FULL_SAMPLES = 3000;
 export const MIN_CONTAINER_CHARS = 100;
 /** 正文最大字符数 */
 export const MAX_BODY_CHARS = 200_000;
+
+// ---- 内容级贝叶斯(零词表兜底分类器,见 content-bayes.mjs) ----
+/** 成熟所需有效样本数(置信度加权) */
+export const BAYES_MIN_SAMPLES = envNumber("WEBSEARCH_BAYES_MIN_SAMPLES", 40);
+/** 正/负类样本各自下限(防单类投毒) */
+export const BAYES_MIN_CLASS_SAMPLES = envNumber("WEBSEARCH_BAYES_MIN_CLASS_SAMPLES", 10);
+/** 合成概率取的极端 token 数(Paul Graham 风格) */
+export const BAYES_TOP_K = envNumber("WEBSEARCH_BAYES_TOP_K", 15);
+/** 预测低质概率阈值:超过才产出弱负证据 */
+export const BAYES_PREDICT_THR = 0.65;
