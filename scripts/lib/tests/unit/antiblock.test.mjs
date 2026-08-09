@@ -18,6 +18,14 @@ test("isCfAnti: 非 CF / 边界输入不误判", () => {
   assert.equal(isCfAnti({ type: 42 }), false, "type 非字符串不误判");
 });
 
+test("detectAntibot: 知乎 40362 风控 JSON → login-wall(供 fetch 跳过存档直接浏览器)", () => {
+  const r = detectAntibot(JSON.stringify({ code: 40362, message: "您当前请求存在异常" }));
+  assert.equal(r?.type, "login-wall");
+  const r2 = detectAntibot("暂时限制本次访问");
+  assert.equal(r2?.type, "login-wall");
+  assert.equal(detectAntibot("正常页面内容"), null);
+});
+
 test("isCfAnti: 与 detectAntibot 集成(CF 验证页 HTML → 命中)", () => {
   const cfPage = `<html><head><title>Just a moment...</title></head><body>
     <div class="cf-challenge">Performing security verification</div>

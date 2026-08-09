@@ -15,6 +15,8 @@
 
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // ⚠ flag 防护:cli 决策链测试依赖 mock.module(实验性 API,需 --experimental-test-module-mocks)。
 // npm test 已带该 flag;但手动 `node --test xxx` 跑时会 mock.module undefined → 直接 TypeError
@@ -27,8 +29,11 @@ if (typeof mock?.module !== "function") {
 
 async function runCliTests() {
 
+// 测试隔离:archive 冷却状态写到临时文件,避免污染真实 cache
+process.env.WEBSEARCH_ARCHIVE_FAIL_FILE = join(tmpdir(), `ws-archive-fail-${process.pid}.json`);
+
 // ---------- mock 依赖(cli.mjs 的 import 链),必须在 import cli.mjs 之前 ----------
-const calls = { fetchPage: [], fetchViaBrowser: [], cachePut: [], cacheGet: 0, cfHost: 0, selection: [] };
+const calls = { fetchPage: [], fetchViaBrowser: [], cachePut: [], cacheGet: 0, cfHost: 0, selection: [], httpGetFull: 0 };
 // 测试间共享的"当前结果",每个 test 开始前设置
 const state = { fetchPageResult: null, browserResult: null, cfHost: false, fetchPageThrows: null, cacheHit: null };
 
@@ -78,8 +83,8 @@ mock.module("../../http.mjs", {
     timeoutSignal: () => undefined, tcpProbe: async () => false,
     httpGet: async () => { throw new Error("httpGet mocked off"); },
     httpGetJson: async () => { throw new Error("httpGetJson mocked off"); },
-    // fetchViaArchive 用:默认 archive 不可达(慢链直接失败)
-    httpGetFull: async () => { throw new Error("archive unreachable"); },
+    // fetchViaArchive 用:默认 archive 不可达(慢链直接失败);调用次数供冷却测试断言
+    httpGetFull: async () => { calls.httpGetFull++; throw new Error("archive unreachable"); },
   },
 });
 
@@ -216,6 +221,44 @@ test("⑤c 直连 404 + 浏览器不可用:仍报页面不存在(404 是确定�
   } finally { restoreLog(); }
   assert.ok(err, "应抛错");
   assert.match(err.message, /页面不存在/, "直连 404 是确定性信号,浏览器失败不影响结论");
+});
+
+// ---------- ⑤d archive 冷却期:跳过存档直接浏览器(不可达网络省 ~20s) ----------
+test("⑤d archive 冷却期:403 跳过存档直接浏览器,不再白等镜像超时", async () => {
+  const { archiveCooldown } = await import("../../fetch-flow.mjs");
+  reset(); silenceLog();
+  // 连续失败达阈值 → 进入冷却(与真实不可达网络一致)
+  archiveCooldown.mark("archive", false);
+  archiveCooldown.mark("archive", false);
+  assert.ok(archiveCooldown.isCooled("archive"), "连续失败应进入冷却");
+  calls.httpGetFull = 0;
+  state.fetchPageThrows = Object.assign(new Error("HTTP 403 Forbidden"), { status: 403, body: "<html>denied</html>" });
+  state.browserResult = pageOk({ title: "ViaBrowser" });
+  try {
+    await runFetch(URL_, 500);
+  } finally {
+    archiveCooldown.reset(); // 清理测试状态
+    restoreLog();
+  }
+  assert.equal(calls.httpGetFull, 0, "冷却期内不应调用存档镜像");
+  assert.equal(calls.fetchViaBrowser.length, 1, "直接浏览器兜底");
+});
+
+// ---------- ⑤e login-wall(知乎 40362):跳过存档直接浏览器 ----------
+test("⑤e login-wall 风控(知乎 40362):跳过存档直接浏览器", async () => {
+  reset(); silenceLog();
+  calls.httpGetFull = 0;
+  state.fetchPageThrows = Object.assign(new Error("HTTP 403"), {
+    status: 403,
+    body: JSON.stringify({ code: 40362, message: "您当前请求存在异常" }),
+  });
+  state.browserResult = pageOk({ title: "ViaBrowser" });
+  try {
+    await runFetch(URL_, 500);
+  } finally { restoreLog(); }
+  assert.equal(calls.httpGetFull, 0, "login-wall 不应走存档(archive 也抓不到需登录内容)");
+  assert.equal(calls.fetchViaBrowser.length, 1, "直接浏览器兜底");
+  assert.equal(calls.fetchViaBrowser[0].opts.preferCli, true, "login-wall 走 CLI 真实等待轮(库模式 CDP 泄漏必被拦)");
 });
 
 // ---------- ⑥ 已知 CF 站 → 跳过直连,直接 preferCli 兜底 ----------

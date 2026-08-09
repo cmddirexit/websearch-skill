@@ -14,13 +14,24 @@ import {
   MAX_BODY_CHARS,
   ARCHIVE_WAYBACK_TIMEOUT_MS,
   ARCHIVE_TODAY_TIMEOUT_MS,
+  ARCHIVE_COOLDOWN_MS,
+  ARCHIVE_FAIL_FILE,
 } from "./config.mjs";
+import { createCooldown } from "./cooldown.mjs";
 import { pageCacheGet, hostOf, isKnownCfHost } from "./persist.mjs";
 import { dbg, dbgStep, brief } from "./debug.mjs";
 import { isAntibotContent, classifyFetchResult, detectAntibot, isCfAnti } from "./antiblock.mjs";
 import { rep, queueFetchLearn } from "./learn.mjs";
 import { emitFetchResult } from "./format.mjs";
 import { validateFetchUrl } from "./url-safety.mjs";
+
+/** 存档兜底失败冷却:不可达网络下连续失败后跳过(跨进程持久化,成功自动恢复)。
+ * file 支持 env 覆盖(测试隔离,避免写真实 cache)。 */
+export const archiveCooldown = createCooldown({
+  threshold: 2,
+  cooldownMs: ARCHIVE_COOLDOWN_MS,
+  file: process.env.WEBSEARCH_ARCHIVE_FAIL_FILE || ARCHIVE_FAIL_FILE,
+});
 
 /** 抓取调度:直连失败时尝试浏览器兜底。(导出供决策链单测;见 tests/unit/cli.test.mjs) */
 export async function runFetch(url, maxChars) {
@@ -144,8 +155,12 @@ export async function runFetch(url, maxChars) {
     // —— 二者都直接走浏览器快速通道,跳过存档
     const host = hostOf(url);
     const isCf = isCfAnti(anti) || isKnownCfHost(host);
+    // 登录/会话风控(知乎 40362 等):archive 同样抓不到需登录的内容,且此类站
+    // 库模式 CDP 泄漏必被拦 —— 与 CF 同待遇:跳过存档,直接 CLI 真实等待轮。
+    const isLoginWall = anti?.type === "login-wall";
+    const isKnownAnti = isCf || isLoginWall;
     console.error(`[degrade] 直连抓取失败(${e.message})${anti ? ` —— ${anti.label}` : isCf ? " —— 已知 CF 站点" : ""},尝试兜底...`);
-    dbg(`直连失败: ${e.message}${anti ? `(反爬: ${anti.label})` : ""} isCf=${isCf} → 走兜底链`);
+    dbg(`直连失败: ${e.message}${anti ? `(反爬: ${anti.label})` : ""} isCf=${isCf} isLoginWall=${isLoginWall} → 走兜底链`);
     // HTTP 404 = 页面不存在:与反爬/网络错误不同,404 是确定性结论 —— 存档兜底
     // 必然同样 404(archive 不会保存不存在的页面),白跑 20s+;浏览器渲染也只会拿到
     // 404 页(Next.js 等 SSR 站尤其如此)。直接标记 notFound,浏览器确认一次后报准确错误。
@@ -153,13 +168,16 @@ export async function runFetch(url, maxChars) {
     if (isNotFound) {
       dbg(`直连 HTTP 404 → 页面不存在(非反爬/网络错误),跳过存档,浏览器确认...`);
     }
-    // 存档兜底条件:非 CF 站点 且 有 HTTP 状态(网络层失败 fetch failed/aborted 时
-    // archive 站同样不可达,实测纯浪费;只有 HTTP 403/5xx 才有存档价值,如知乎直连 403)
+    // 存档兜底条件:非反爬硬墙站 且 非冷却期 且 有 HTTP 状态(网络层失败 fetch failed/aborted 时
+    // archive 站同样不可达,实测纯浪费;只有 HTTP 403/5xx 才有存档价值,如知乎直连 403)。
+    // 冷却期:archive 连续失败达阈值后跳过(不可达网络下省 ~20s),成功自动恢复。
     let ar = null;
-    if (!isCf && e.status && !isNotFound) {
+    if (!isKnownAnti && !archiveCooldown.isCooled("archive") && e.status && !isNotFound) {
       try {
         ar = await dbgStep("存档兜底(wayback+today)", () => fetchViaArchive(url, MAX_BODY_CHARS));
+        if (ar) archiveCooldown.mark("archive", true);
       } catch (ae) {
+        archiveCooldown.mark("archive", false);
         console.error(`[degrade] 存档兜底不可用(${ae.message})`);
         dbg(`存档兜底失败: ${String(ae.message).slice(0, 120)}`);
       }
@@ -181,8 +199,8 @@ export async function runFetch(url, maxChars) {
       // 8-9s 即可确认浏览器渲染后仍是 404 页,无需 CLI 真实等待轮
       br = await dbgStep("浏览器兜底", () =>
         fetchViaBrowser(url, MAX_BODY_CHARS, {
-          preferCli: isCf || !e.status,
-          skipZendriver: isCf || !e.status || isNotFound,
+          preferCli: isKnownAnti || !e.status,
+          skipZendriver: isKnownAnti || !e.status || isNotFound,
         }),
       );
     } catch (be) {

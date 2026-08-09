@@ -90,6 +90,9 @@ export const ZD_SOLVER_TIMEOUT_MS = 75_000;
 /** 存档镜像:web.archive.org 单发超时 / archive.today 系并行每镜像超时 */
 export const ARCHIVE_WAYBACK_TIMEOUT_MS = 12_000;
 export const ARCHIVE_TODAY_TIMEOUT_MS = 8_000;
+/** 存档兜底失败冷却:不可达网络下避免每次 fetch 白等 ~20s(与引擎失败记忆同模式) */
+export const ARCHIVE_COOLDOWN_MS = envNumber("WEBSEARCH_ARCHIVE_COOLDOWN_MS", 5 * 60_000);
+export const ARCHIVE_FAIL_FILE = `${CACHE_DIR}/websearch-archive-fail.json`;
 /** 页面级缓存 TTL:同一 URL 重复抓取秒回,CF 站点冷启动 9s → 热请求 0s */
 export const PAGE_CACHE_TTL_MS = envNumber("WEBSEARCH_PAGE_CACHE_TTL_MS", USER_CONFIG.cache?.pageTtlMs ?? 6 * 3600 * 1000);
 /** 库模式(page.goto)导航超时 */
