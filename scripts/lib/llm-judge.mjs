@@ -56,7 +56,7 @@ export function llmConfig(env = process.env, fileConfig = USER_CONFIG.llm || {})
 }
 
 const SOFT_DESC =
-  "信息聚合站(如百科/文档/官方)、真实问答社区(知乎/贴吧/论坛)里真人讨论/官方文档不算软文。";
+  "信息聚合站(如百科/文档/官方)、真实问答社区(贴吧/论坛/问答平台)里真人讨论/官方文档不算软文。";
 
 // —— 判断缓存:同 URL+标题 30 天内不重判(agent 常连续搜相似问题,命中则零 LLM 调用) ——
 const CACHE_FILE = `${CACHE_DIR}/websearch-llm-judged.json`;
