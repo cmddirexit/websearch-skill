@@ -220,7 +220,7 @@ export async function embedTexts(texts, { quiet = false } = {}) {
  * MRL 维度压缩(EMBED_API_DIMENSIONS)不被支持的提供商(400/422)自动去掉重试。
  * @returns {Promise<number[][]|null>}
  */
-async function apiEmbedTexts(texts, { quiet = false } = {}) {
+export async function apiEmbedTexts(texts, { quiet = false } = {}) {
   const key = getApiKey();
   if (!key) {
     if (!quiet) console.error("[degrade] 未配置 SILICONFLOW_API_KEY(环境变量或 .env.json),跳过 API 嵌入");

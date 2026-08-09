@@ -31,6 +31,7 @@ import {
 import { judgeResults, judgeText, judgeCacheGet } from "./llm-judge.mjs";
 import { atomicWriteJsonSync } from "./state-file.mjs";
 import { assessContentEvidence } from "./content-evidence.mjs";
+import { assessSemanticEvidence } from "./semantic-evidence.mjs";
 
 // 实例内部使用的纯函数(显式 import,re-export 不创建当前作用域绑定)
 import { clamp, CONTENT_LOW_FLAGS, contributionFromQuality, updateScore, updateFetchScore, updateAvailabilityScore, updateUtilityScore, effectiveScore, availabilityFactor, utilityFactor, decayedScore, repFactor, repBadge, predictTokens, updateMetaTokens, normalizedFeatureVector, metaReady } from "./rep-score.mjs";
@@ -398,6 +399,9 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
       evidence = { label: contribution, confidence: 0.9, source: "llm-body-v1" };
     } else {
       evidence = assessContentEvidence(extra);
+      // 结构证据模棱两可时,用零词表的标题-正文语义一致性兜底(标题党检测);
+      // 语义嵌入不可用(无 key/本地模型)时返回 null,静默降级,不拖慢 fetch。
+      if (!evidence) evidence = await assessSemanticEvidence(extra);
     }
     if (evidence) {
       const tokens = extractLearnFeatures(url, extra);
