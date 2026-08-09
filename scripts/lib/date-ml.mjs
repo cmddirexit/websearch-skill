@@ -22,11 +22,12 @@
  * 随 fetch 使用在线收敛。持久化 ~/.cache/websearch-date-model.json。
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "os";
 import path from "path";
 import { parseDom, queryAll, elementText } from "./dom.mjs";
 import { parseDateFromUrl, normalizeCnDate, extractSerpDate, stripTags } from "./html.mjs";
+import { atomicWriteJsonSync } from "./state-file.mjs";
 
 const MODEL_FILE = path.join(homedir(), ".cache", "websearch-date-model.json");
 /** 测试模式(node:test 会设 NODE_TEST_CONTEXT):不读不写模型文件 —— 单测隔离、确定性强,
@@ -277,8 +278,7 @@ export function saveDateModel() {
   if (IS_TEST) return; // 测试模式不落盘
   if (!_dirty) return;
   try {
-    mkdirSync(path.dirname(MODEL_FILE), { recursive: true });
-    writeFileSync(MODEL_FILE, JSON.stringify({ version: 1, updatedAt: Date.now(), list: m.list, cand: m.cand }));
+    atomicWriteJsonSync(MODEL_FILE, { version: 1, updatedAt: Date.now(), list: m.list, cand: m.cand });
     _dirty = false;
   } catch {
     /* 写失败不影响主流程 */

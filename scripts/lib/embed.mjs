@@ -31,11 +31,15 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync
 import { createHash } from "node:crypto";
 import { join as pathJoin } from "node:path";
 import { createCooldown } from "./cooldown.mjs";
-import { CACHE_DIR, EMBED_MODEL, EMBED_API_BASE, EMBED_API_MODEL, EMBED_API_DIMENSIONS, EMBED_FAIL_FILE } from "./config.mjs";
+import { CACHE_DIR, EMBED_BACKEND, EMBED_MODEL, EMBED_API_BASE, EMBED_API_MODEL, EMBED_API_DIMENSIONS, EMBED_FAIL_FILE } from "./config.mjs";
 
 let embedder = null; // {extract, model}
 let attempted = false;
 let hooksReady = null; // Promise<{webDist:URL}|null> 一次性
+
+function currentEmbedBackend(env = process.env) {
+  return env.WEBSEARCH_EMBED_BACKEND || EMBED_BACKEND;
+}
 
 // ---- API 失败记忆(通用冷却工具,跨进程持久化) ----
 // 连续失败 2 次 → 冷却 5 分钟,期内不再请求;成功清零。
@@ -130,7 +134,7 @@ function getApiKey() {
 
 /** 是否需要在 import transformers 前注册 WASM 重定向 hooks */
 function needWasmRedirect() {
-  if (process.env.WEBSEARCH_EMBED_BACKEND === "wasm") return true; // 显式强制
+  if (currentEmbedBackend() === "wasm") return true; // 显式强制
   return process.platform === "android"; // Termux:onnxruntime-node 无 android 预编译
 }
 
@@ -177,7 +181,7 @@ export async function getEmbedder({ quiet = false } = {}) {
       tf.env.backends.onnx.wasm.wasmPaths = wasm.webDist.href;
       tf.env.backends.onnx.wasm.numThreads = 1;
     }
-    const model = process.env.WEBSEARCH_EMBED_MODEL || EMBED_MODEL;
+    const model = EMBED_MODEL;
     const extract = await tf.pipeline("feature-extraction", model, { quantized: true });
     embedder = { extract, model };
   } catch (e) {
@@ -244,7 +248,7 @@ async function apiEmbedTexts(texts, { quiet = false } = {}) {
         if (!j.data?.length) throw new Error("API 返回空数据");
         const out = j.data.map((d) => d.embedding || []);
         apiCooldown.mark(API_KEY, true); // 成功清零
-        if (!quiet && process.env.WEBSEARCH_EMBED_BACKEND !== "api") {
+        if (!quiet && currentEmbedBackend() !== "api") {
           console.error(`[info] 语义嵌入使用 API 后端(${model}, ${out[0]?.length || 0} 维)`);
         }
         return out;
@@ -312,7 +316,8 @@ export async function embedResults(results, { quiet = false, query = "" } = {}) 
   ];
 
   // 显式后端:api=强制 API;local/wasm=强制本地(无 key 时兜底)
-  const forced = process.env.WEBSEARCH_EMBED_BACKEND;
+  const configuredBackend = currentEmbedBackend();
+  const forced = configuredBackend === "auto" ? undefined : configuredBackend;
   if (forced === "off") return { available: false };
   if (forced === "api") {
     const vectors = await apiEmbedTexts(texts, { quiet });

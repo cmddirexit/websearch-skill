@@ -27,6 +27,8 @@ test("rep: 两级键 = host 全站 + host/首段路径(站内子空间)", () => 
   // 首页无路径段 → 仅 host;文件扩展名/功能段路径不建子键
   assert.deepEqual(repKeys("https://blog.com/"), ["blog.com"]);
   assert.deepEqual(repKeys("https://blog.com/index.html"), ["blog.com"]);
+  assert.deepEqual(repKeys("https://news.example.com/2026/08/story"), ["example.com"], "年份首段不是内容分区");
+  assert.deepEqual(repKeys("https://news.example.com/123456/story"), ["example.com"], "纯数字 ID 首段不是内容分区");
   assert.deepEqual(repKeys("https://github.com/login"), ["github.com"], "功能段不建子键");
   assert.deepEqual(repKeys("https://e.so.com/we?q=1"), [], "引擎域无键");
 });
@@ -181,6 +183,47 @@ test("rep: 软降权应用 — quality 乘因子,低信誉压沉不剔除,冷启
   assert.equal(results[2].quality, 1, "冷启动零影响");
   assert.ok(results[0].rep.badge.startsWith("⚠"), "低信誉打负 badge");
   assert.ok(results[1].rep.badge.startsWith("✓"), "高信誉打正 badge");
+});
+
+
+test("rep: 单个启发式极端分不冒充独立证据提前干预", () => {
+  const rep = createDomainReputation({ file: null });
+  rep.learnFromResults([{
+    title: "疑似推广",
+    url: "https://heuristic.example/sponsored/1",
+    flags: ["low:spam-desc", "low:index-page"],
+    quality: 0.2,
+  }]);
+  const hit = rep.lookup("https://heuristic.example/sponsored/2");
+  assert.equal(hit.trustedSamples, 0);
+  assert.equal(hit.factor, 1, "不足 3 样本且无 LLM/fetch 证据时不得提前降权");
+  assert.equal(hit.badge, "");
+});
+
+
+test("rep: 路径级样本优先于全站样本,隔离同站不同内容区", () => {
+  const rep = createDomainReputation({ file: null });
+  for (let i = 0; i < 8; i++) {
+    rep.learnFromResults([{
+      title: `正常技术文章 ${i}`,
+      url: `https://mixed.example/articles/${i}`,
+      flags: [],
+      quality: 1,
+    }]);
+  }
+  for (let i = 0; i < 4; i++) {
+    rep.learnFromResults([{
+      title: `推广软文 ${i}`,
+      url: `https://mixed.example/sponsored/${i}`,
+      flags: ["low:spam-desc"],
+      quality: 0.3,
+    }]);
+  }
+  const articles = rep.lookup("https://mixed.example/articles/next");
+  const sponsored = rep.lookup("https://mixed.example/sponsored/next");
+  assert.equal(articles.scope, "mixed.example/articles");
+  assert.equal(sponsored.scope, "mixed.example/sponsored");
+  assert.ok(articles.score > sponsored.score + 0.4, `${articles.score} vs ${sponsored.score}`);
 });
 
 

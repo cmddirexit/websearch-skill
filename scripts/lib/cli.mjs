@@ -26,8 +26,8 @@
  * 由调用方决定处理方式(薄壳 websearch.mjs 负责 catch 后 process.exit)。
  */
 
-import { loadEngines } from "./engines/registry.mjs";
-import { TOTAL_BUDGET_MS, REVEAL_FILE } from "./config.mjs";
+import { loadEngines, defaultEngineKey } from "./engines/registry.mjs";
+import { DEFAULT_SEARCH_LIMIT, TOTAL_BUDGET_MS, REVEAL_FILE } from "./config.mjs";
 import { withBudget } from "./budget.mjs";
 import { aggregateSearch } from "./aggregate.mjs";
 import { applySinceFilter } from "./filter.mjs";
@@ -50,6 +50,7 @@ export { cacheFetchResult } from "./format.mjs";
  *    puppeteer-core/playwright,否则自动降级 chromium CLI(零 npm 依赖)
  */
 const ENGINES = loadEngines();
+const DEFAULT_ENGINE = defaultEngineKey(ENGINES);
 
 const HELP = `用法:
   websearch.mjs search "查询词" [--engine ${Object.keys(ENGINES).join("|")}] [--limit N] [--flat] [--semantic|--no-semantic] [--since 24h|1w|1m|1y]
@@ -168,8 +169,8 @@ export async function main(args) {
   if (cmd === "search") {
     // 逐项消费 flag 值(--engine/--limit 的取值不作为查询词),剩余非 flag 参数拼接为查询词
     // 修复: 旧实现 rest.find(!startsWith("--")) 会把 flag 值(如 --engine bing 的 "bing")误当查询词
-    let engine = "bing";
-    let limit = 99; // 默认拉满:多引擎聚合尽量抓全(单引擎每页硬限 ~10 条,99 是聚合上限而非保证值)
+    let engine = DEFAULT_ENGINE;
+    let limit = DEFAULT_SEARCH_LIMIT; // 默认拉满:99 是聚合上限而非保证值
     let flat = false;
     let semantic = null; // null=自动尝试(装了嵌入可用,不可用静默降级); true/false 强制
     let since = ""; // 时效过滤(24h|1w|1m|1y),目前仅 chinaso 生效(官方 API stime/etime)
@@ -185,7 +186,7 @@ export async function main(args) {
       if (!a.startsWith("--")) queryParts.push(a);
     }
     const query = queryParts.join(" "); // 多词查询不带引号也支持
-    limit = Math.min(Math.max(limit || 99, 1), 150);
+    limit = Math.min(Math.max(limit || DEFAULT_SEARCH_LIMIT, 1), 150);
     if (!query && engine !== "cnnews") throw new Error('缺少查询词,用法: websearch.mjs search "查询词"');
     if (engine === "cnnews" && !query) console.error("[cnnews] 空查询 → 最新要闻(热点模式)");
     if (!ENGINES[engine]) throw new Error(`未知引擎: ${engine}(可选 ${Object.keys(ENGINES).join("|")})`);

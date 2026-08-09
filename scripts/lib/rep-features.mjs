@@ -57,7 +57,10 @@ export function repKeys(url) {
   const keys = [host];
   try {
     const seg = (new URL(url).pathname.split("/").filter(Boolean)[0] || "").toLowerCase();
-    if (seg && !FUNCTIONAL_PATH_SEGS.has(seg) && !/\.(html?|php|jsp|aspx|json)$/i.test(seg)) keys.push(`${host}/${seg}`);
+    const identifierLike = /^\d+$/.test(seg) || /^(?:19|20)\d{2}[-_]\d{1,2}(?:[-_]\d{1,2})?$/.test(seg);
+    if (seg && !identifierLike && !FUNCTIONAL_PATH_SEGS.has(seg) && !/\.(html?|php|jsp|aspx|json)$/i.test(seg)) {
+      keys.push(`${host}/${seg}`);
+    }
   } catch {
     /* 忽略 */
   }

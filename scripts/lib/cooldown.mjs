@@ -13,7 +13,8 @@
  * 注意:未冷却但已累计的 fails 计数必须持久化(只存冷却条目会导致跨进程
  * 计数归零、永远达不到阈值 —— 早期 bug 的教训,见 load() 实现)。
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { atomicWriteJsonSync } from "./state-file.mjs";
 
 /**
  * @param {Object} cfg
@@ -51,7 +52,7 @@ export function createCooldown({ threshold = 2, cooldownMs = 5 * 60_000, file = 
     try {
       const j = {};
       for (const [k, v] of state) j[k] = v;
-      writeFileSync(file, JSON.stringify(j));
+      atomicWriteJsonSync(file, j);
     } catch {
       /* 忽略 */
     }
@@ -94,7 +95,7 @@ export function createCooldown({ threshold = 2, cooldownMs = 5 * 60_000, file = 
     reset() {
       state.clear();
       if (file) {
-        try { writeFileSync(file, "{}"); } catch { /* 忽略 */ }
+        try { atomicWriteJsonSync(file, {}); } catch { /* 忽略 */ }
       }
     },
   };

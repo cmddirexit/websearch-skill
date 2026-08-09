@@ -4,8 +4,7 @@
  * 常量集中在 config.mjs,此处 re-export UA 保持 index.mjs 兼容。
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { connect } from "node:net";
 import {
   UA,
@@ -19,6 +18,7 @@ import {
   TLS_FALLBACK_ENABLED,
 } from "./config.mjs";
 import { httpGetViaImpersonate, isTlsFallbackCandidate } from "./tls.mjs";
+import { atomicWriteJsonSync } from "./state-file.mjs";
 
 // re-export 保持 index.mjs 兼容(外部仍可从 "./http.mjs" 拿 REQ_HEADERS)
 export { REQ_HEADERS };
@@ -116,7 +116,6 @@ function persistCookieJar() {
   if (now - lastPersistAt < COOKIE_PERSIST_INTERVAL_MS) return;
   lastPersistAt = now;
   try {
-    mkdirSync(dirname(COOKIE_FILE), { recursive: true });
     const out = {};
     for (const [host, hostCookies] of cookieJar) {
       const valid = [...hostCookies]
@@ -125,7 +124,7 @@ function persistCookieJar() {
         .map(([name, c]) => ({ name, value: c.value, expiresAt: c.expiresAt, savedAt: now }));
       if (valid.length) out[host] = valid;
     }
-    writeFileSync(COOKIE_FILE, JSON.stringify(out));
+    atomicWriteJsonSync(COOKIE_FILE, out, { mode: 0o600 });
   } catch {
     /* 持久化失败不阻塞请求 */
   }

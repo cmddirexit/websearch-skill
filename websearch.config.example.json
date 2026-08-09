@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "engines": {
+    "default": "bing",
+    "disabled": [],
+    "order": ["bing", "baidu", "sogou", "so360", "github", "sm", "toutiao", "sogou-wechat"]
+  },
+  "network": {
+    "httpTimeoutMs": 10000,
+    "fetchTimeoutMs": 20000,
+    "totalBudgetMs": 40000,
+    "perEngineTimeoutMs": 12000
+  },
+  "cache": {
+    "pageTtlMs": 21600000
+  },
+  "browser": {
+    "navigationTimeoutMs": 20000
+  },
+  "semantic": {
+    "backend": "auto",
+    "localModel": "Xenova/bge-small-zh-v1.5",
+    "apiBase": "https://api.siliconflow.cn/v1",
+    "apiModel": "Qwen/Qwen3-Embedding-8B",
+    "apiDimensions": 1024,
+    "relevanceMode": "balanced"
+  },
+  "reputation": {
+    "strength": 1.6
+  },
+  "llm": {
+    "enabled": false,
+    "provider": "deepseek",
+    "model": "deepseek-chat"
+  }
+}

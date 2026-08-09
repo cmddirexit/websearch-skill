@@ -1,9 +1,9 @@
 # 依赖与构建
 node_modules/
-package-lock.json
 
 # 敏感信息(SILICONFLOW_API_KEY 等环境配置)
 .env.json
+websearch.config.json
 
 # 临时/日志
 *.log

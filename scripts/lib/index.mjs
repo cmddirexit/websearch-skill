@@ -29,13 +29,15 @@ export { fetchGithubTrending, parseGithubTrending, TRENDING_SINCE } from "./engi
 export { isBrowserAvailable, resolveChromiumPath, getDom, fetchViaBrowser, closeBrowser } from "./engines/browser.mjs";
 export { searchBingViaBrowser } from "./engines/bing-browser.mjs";
 export { searchMarginaliaViaBrowser } from "./engines/marginalia-browser.mjs";
-import { loadEngines, ENGINE_IMPLS, ENGINE_LABELS } from "./engines/registry.mjs";
-export { loadEngines, ENGINE_IMPLS, ENGINE_LABELS };
+import { loadEngines, defaultEngineKey, ENGINE_IMPLS, ENGINE_LABELS } from "./engines/registry.mjs";
+export { loadEngines, defaultEngineKey, ENGINE_IMPLS, ENGINE_LABELS };
+export { loadUserConfig, validateUserConfig, resolveUserConfigPath, USER_CONFIG, USER_CONFIG_FILE } from "./user-config.mjs";
 export { fetchPage, fetchPageDirect, extractBodyFromHtml, extractPublishedAt, extractLinkList, linkArticleScore, nearbyDate, LIST_MIN_ITEMS, LIST_SHELL_MAX_CHARS } from "./fetch-page.mjs";
 export { decodeEntities, clean, stripTags, extractAttr, extractTitle, extractMetaDescription, parseDateFromUrl, normalizeCnDate, extractSerpDate } from "./html.mjs";
 // 发布时间提取 ML(规则候选 + 在线学习裁决,非 LLM)
 export { extractDateCandidates, extractPageFeatures, pickDate, recordFetchOutcome, predictLinear, updateLinear, inspectDateModel, resetDateModel, saveDateModel } from "./date-ml.mjs";
 export { httpGet, httpGetFull, httpGetJson, UA, REQ_HEADERS } from "./http.mjs";
+export { validateFetchUrl, isNonPublicIp, UNSAFE_URL_CODE } from "./url-safety.mjs";
 // TLS 指纹兜底(直连 403/TLS 拦截时的 curl-impersonate/curl_cffi 重试)
 export {
   httpGetViaImpersonate,

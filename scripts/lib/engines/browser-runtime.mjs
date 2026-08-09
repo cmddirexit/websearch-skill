@@ -15,6 +15,7 @@ import {
   STEALTH_VIEWPORT_W,
   STEALTH_VIEWPORT_H,
   STEALTH_LOCALE,
+  BROWSER_PATH,
 } from "../config.mjs";
 import { STEALTH_INIT_SCRIPT } from "./browser-stealth.mjs";
 import { humanize } from "./browser-humanize.mjs";
@@ -57,6 +58,10 @@ export function resolveChromiumPath() {
   cachedChromiumPath = null;
   if (process.env.WEBSEARCH_BROWSER_PATH && existsSync(process.env.WEBSEARCH_BROWSER_PATH)) {
     cachedChromiumPath = process.env.WEBSEARCH_BROWSER_PATH;
+    return cachedChromiumPath;
+  }
+  if (BROWSER_PATH && existsSync(BROWSER_PATH)) {
+    cachedChromiumPath = BROWSER_PATH;
     return cachedChromiumPath;
   }
   const termuxPrefix = process.env.PREFIX || "/data/data/com.termux/files/usr";

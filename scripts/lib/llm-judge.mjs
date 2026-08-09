@@ -13,6 +13,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { CACHE_DIR } from "./config.mjs";
+import { USER_CONFIG } from "./user-config.mjs";
 
 const PROVIDERS = {
   deepseek: {
@@ -33,14 +34,17 @@ const PROVIDERS = {
 };
 
 /** 解析显式 LLM 配置。可注入 env,便于测试凭据边界。 */
-export function llmConfig(env = process.env) {
-  if (env.WEBSEARCH_LLM_ENABLED !== "1" || env.WEBSEARCH_LLM_OFF === "1") return null;
-  const provider = String(env.WEBSEARCH_LLM_PROVIDER || "").toLowerCase();
+export function llmConfig(env = process.env, fileConfig = USER_CONFIG.llm || {}) {
+  const enabled = env.WEBSEARCH_LLM_ENABLED !== undefined
+    ? env.WEBSEARCH_LLM_ENABLED === "1"
+    : fileConfig.enabled === true;
+  if (!enabled || env.WEBSEARCH_LLM_OFF === "1") return null;
+  const provider = String(env.WEBSEARCH_LLM_PROVIDER || fileConfig.provider || "").toLowerCase();
   const preset = PROVIDERS[provider];
   if (!preset && provider !== "custom") return null;
   const key = env.WEBSEARCH_LLM_KEY || (preset?.keyNames || []).map((name) => env[name]).find(Boolean);
-  const baseURL = env.WEBSEARCH_LLM_BASE_URL || preset?.baseURL;
-  const model = env.WEBSEARCH_LLM_MODEL || preset?.model;
+  const baseURL = env.WEBSEARCH_LLM_BASE_URL || fileConfig.baseUrl || preset?.baseURL;
+  const model = env.WEBSEARCH_LLM_MODEL || fileConfig.model || preset?.model;
   if (!key || !baseURL || !model) return null;
   try {
     const parsed = new URL(baseURL);

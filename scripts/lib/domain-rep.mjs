@@ -29,13 +29,14 @@
  *
  * 持久化:~/.cache/websearch-domain-rep.json(跨 CLI 进程增量积累)
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   REP_FILE, REP_MIN_SAMPLES, REP_STRENGTH, REP_DECAY_START_DAYS, REP_DECAY_FULL_DAYS,
   REP_MAX_DOMAINS, REP_FETCH_OK_CONTRIB, REP_FETCH_EMPTY_CONTRIB,
   META_LR, META_MIN_SAMPLES, META_COLD_CLAMP, META_MAX_WEIGHTS, META_STRONG_LR, META_TRUST_FULL_SAMPLES,
 } from "./config.mjs";
 import { judgeResults, judgeText, judgeCacheGet } from "./llm-judge.mjs";
+import { atomicWriteJsonSync } from "./state-file.mjs";
 
 // 实例内部使用的纯函数(显式 import,re-export 不创建当前作用域绑定)
 import { clamp, CONTENT_LOW_FLAGS, contributionFromQuality, updateScore, updateFetchScore, effectiveScore, decayedScore, repFactor, repBadge, predictTokens, updateMetaTokens } from "./rep-score.mjs";
@@ -105,8 +106,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
         entries.sort((a, b) => (a[1].lastSeen || 0) - (b[1].lastSeen || 0));
         for (const [k] of entries.slice(0, Math.floor(REP_MAX_DOMAINS / 2))) delete domains[k];
       }
-      mkdirSync(file.replace(/\/[^/]+$/, ""), { recursive: true });
-      writeFileSync(file, JSON.stringify({ version: REP_SCHEMA_VERSION, updatedAt: Date.now(), meta, domains }));
+      atomicWriteJsonSync(file, { version: REP_SCHEMA_VERSION, updatedAt: Date.now(), meta, domains });
     } catch {
       /* 写失败不影响主流程 */
     }
@@ -114,7 +114,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
 
   function getEntry(key) {
     if (!domains[key]) {
-      domains[key] = { searchScore: 0.5, fetchScore: 0.5, searchSamples: 0, fetchSamples: 0, lowHits: 0, okHits: 0, fetchOk: 0, fetchEmpty: 0, fetchBlocked: 0, firstSeen: Date.now(), lastSeen: Date.now() };
+      domains[key] = { searchScore: 0.5, fetchScore: 0.5, searchSamples: 0, fetchSamples: 0, trustedSamples: 0, lowHits: 0, okHits: 0, fetchOk: 0, fetchEmpty: 0, fetchBlocked: 0, firstSeen: Date.now(), lastSeen: Date.now() };
     }
     return domains[key];
   }
@@ -123,18 +123,20 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
    * 记录一个样本。域名级始终更新;learnMeta=true 时才更新跨域模式。
    * 模式 label = metaLabel(提供时)或 contribution —— LLM 内容可信度判断
    *   是可靠信号(quality 分只是形态分,学出来是主题偏置),见 learnFromResultsLLM;
-   *   strong=true 用固定大学习率(fetch 实测强信号,压过中性搜索样本);
+   *   strong=true 用固定大学习率;trusted=true 标记独立 LLM/fetch 证据,只有它可在
+   *   样本不足时让极端分提前生效,规则启发式分不得冒充高置信证据;
    * 域名级:searchScore 用绝对 contribution 递减学习;重复低质模式惩罚(样本≥5 且低质率>0.6 → ×0.6)。
    * @param {Set<string>} tokens 激活 token 集
    * @param {number} metaLabel 跨域模式专用 label(可选;缺省=contribution)
    */
-  function record(url, contribution, { low = false, tokens = null, strong = false, metaLabel = null, learnMeta = true } = {}) {
+  function record(url, contribution, { low = false, tokens = null, strong = false, trusted = false, metaLabel = null, learnMeta = true } = {}) {
     if (learnMeta) updateMetaTokens(meta, tokens || urlTokens(url), metaLabel ?? contribution, { strong });
     for (const key of repKeys(url)) {
       const e = getEntry(key);
       let c = contribution;
       if (e.searchSamples >= 5 && e.lowHits / e.searchSamples > 0.6) c *= 0.6;
       updateScore(e, c);
+      if (trusted) e.trustedSamples = (e.trustedSamples || 0) + 1;
       if (low) e.lowHits++; else e.okHits++;
       e.lastSeen = Date.now();
     }
@@ -183,6 +185,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
         tokens,
         metaLabel: llmScore !== undefined ? contribution : null,
         learnMeta: llmScore !== undefined,
+        trusted: llmScore !== undefined,
       });
     }
     return scoreMap.size > 0; // 是否用了 LLM label
@@ -229,7 +232,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
     if (!url) return;
     const contrib = ok ? REP_FETCH_OK_CONTRIB : REP_FETCH_EMPTY_CONTRIB;
     const tokens = extractLearnFeatures(url, extra);
-    record(url, contrib, { low: !ok, strong: true, tokens });
+    record(url, contrib, { low: !ok, strong: true, trusted: true, tokens });
     for (const key of repKeys(url)) {
       const e = getEntry(key);
       updateFetchScore(e, contrib);
@@ -283,6 +286,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
       tokens,
       // 正文可访问但 LLM 不可用时 contrib=0.6,这不是独立的内容可信度标签。
       learnMeta: softScore !== null,
+      trusted: softScore !== null,
     });
     for (const key of repKeys(url)) {
       const e = getEntry(key);
@@ -299,9 +303,24 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
    * (压缩到 [META_COLD_CLAMP] 防极端,因子生效、badge 标 [meta:x.xx] 提示是预测)。
    */
   function lookup(url, extra = {}) {
-    const host = registrableHost(url);
+    const keys = repKeys(url);
+    const host = keys[0];
     if (!host) return null;
-    const e = domains[host];
+    const hostEntry = domains[host];
+    const pathKey = keys[1];
+    const pathEntry = pathKey ? domains[pathKey] : null;
+    const pathSamples = pathEntry
+      ? (pathEntry.searchSamples || 0) + (pathEntry.fetchSamples || 0)
+      : 0;
+    const pathScore = pathEntry ? decayedScore(pathEntry) : 0.5;
+    // A path entry is more specific than its host. Use it once it has the normal evidence
+    // threshold, or immediately when an independent LLM/fetch signal made it extreme.
+    const usePath = Boolean(pathEntry) && (
+      pathSamples >= REP_MIN_SAMPLES
+      || ((pathEntry.trustedSamples || 0) > 0 && (pathScore <= 0.3 || pathScore >= 0.7))
+    );
+    const e = usePath ? pathEntry : hostEntry;
+    const scope = usePath ? pathKey : host;
     const hasOwn = e && ((e.searchSamples || 0) + (e.fetchSamples || 0)) > 0;
     if (!hasOwn) {
       if (meta.weightSamples >= META_MIN_SAMPLES) {
@@ -322,7 +341,10 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
     // 高置信提前生效:LLM/fetch 判断可靠,分数极端(≤0.3 或 ≥0.7)时样本 1 就干预 ——
     // 否则要等 3 样本,而站群域名每次搜索只出现 1-2 次,可能永远到不了 3,学习白做。
     // 中性分(0.3~0.7)仍零干预(样本不足不冤枉,等积累)。
-    const effSamples = samples >= REP_MIN_SAMPLES || score <= 0.3 || score >= 0.7 ? Math.max(samples, 1) : samples;
+    const trusted = (e.trustedSamples || 0) > 0;
+    const effSamples = samples >= REP_MIN_SAMPLES || (trusted && (score <= 0.3 || score >= 0.7))
+      ? Math.max(samples, 1)
+      : samples;
     return {
       score,
       samples,
@@ -331,6 +353,8 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
       fetchOk: e.fetchOk || 0,
       fetchEmpty: e.fetchEmpty || 0,
       fetchBlocked: e.fetchBlocked || 0,
+      trustedSamples: e.trustedSamples || 0,
+      scope,
     };
   }
 

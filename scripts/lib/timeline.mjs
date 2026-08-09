@@ -11,8 +11,8 @@
  * 成本控制:抓取阶段全局预算 75s(手机上避免拖到几分钟);单篇直连 20s / 浏览器 45s 上限。
  */
 
-import { loadEngines } from "./engines/registry.mjs";
-import { TOTAL_BUDGET_MS } from "./config.mjs";
+import { loadEngines, defaultEngineKey } from "./engines/registry.mjs";
+import { DEFAULT_SEARCH_LIMIT, TOTAL_BUDGET_MS } from "./config.mjs";
 import { aggregateSearch } from "./aggregate.mjs";
 import { filterResults, parseResultDateAgo } from "./filter.mjs";
 import { stripControl, normalizeCnDate, extractSerpDate } from "./html.mjs";
@@ -113,16 +113,17 @@ function firstParagraph(markdown) {
  */
 export async function runTimeline(query, limit = 8) {
   const engines = loadEngines();
-  const engine = engines["bing"];
+  const engineKey = defaultEngineKey(engines);
+  const engine = engines[engineKey];
   const partners = engine.aggregateWith || [];
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   // 1. 聚合搜索(与默认 search 同通道)
   let results = [];
-  const agg = await aggregateSearch(engines, query, 99, ["bing", ...partners], deadline, {});
+  const agg = await aggregateSearch(engines, query, DEFAULT_SEARCH_LIMIT, [engineKey, ...partners], deadline, {});
   if (!agg.blocked && agg.results.length) results = agg.results;
   if (!results.length) {
     try {
-      const r = await engines.bing.search(query, 30, {});
+      const r = await engine.search(query, 30, {});
       results = r?.results || [];
     } catch { /* 主引擎失败 → 空结果 */ }
   }

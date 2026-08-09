@@ -20,9 +20,11 @@ import { dbg, dbgStep, brief } from "./debug.mjs";
 import { isAntibotContent, classifyFetchResult, detectAntibot, isCfAnti } from "./antiblock.mjs";
 import { rep, queueFetchLearn } from "./learn.mjs";
 import { emitFetchResult } from "./format.mjs";
+import { validateFetchUrl } from "./url-safety.mjs";
 
 /** 抓取调度:直连失败时尝试浏览器兜底。(导出供决策链单测;见 tests/unit/cli.test.mjs) */
 export async function runFetch(url, maxChars) {
+  url = validateFetchUrl(url);
   const t0 = Date.now();
   dbg(`fetch start: ${url} (maxChars=${maxChars})`);
   // 页面级缓存命中(6h 内):秒回,不再走 45-90s 的 CF 兜底链

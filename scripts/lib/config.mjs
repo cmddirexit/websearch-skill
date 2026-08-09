@@ -4,6 +4,7 @@
  * 修改策略:Ai/人维护时先看这里,再动各引擎文件。
  * 命名前缀标注用途: HTTP_ / CLI_ / MARGINALIA_ / BAIDU_ / BODY_
  */
+import { USER_CONFIG } from "./user-config.mjs";
 
 /** 读取数值环境变量。显式的 0 必须保留,非法值才回退默认值。 */
 export function envNumber(name, fallback, env = process.env) {
@@ -40,9 +41,9 @@ export function buildMobileUa(version = "149.0.0.0") {
 }
 export const UA_MOBILE = buildMobileUa();
 /** httpGet 默认超时(搜索页) */
-export const HTTP_TIMEOUT_MS = 10_000;
+export const HTTP_TIMEOUT_MS = envNumber("WEBSEARCH_HTTP_TIMEOUT_MS", USER_CONFIG.network?.httpTimeoutMs ?? 10_000);
 /** httpGetFull 默认超时(大页面正文) */
-export const HTTP_FULL_TIMEOUT_MS = 20_000;
+export const HTTP_FULL_TIMEOUT_MS = envNumber("WEBSEARCH_FETCH_TIMEOUT_MS", USER_CONFIG.network?.fetchTimeoutMs ?? 20_000);
 /** 同域连续请求最小间隔(礼貌爬取,降低被风控概率) */
 export const DOMAIN_RATE_LIMIT_MS = 1500;
 
@@ -50,7 +51,9 @@ export const DOMAIN_RATE_LIMIT_MS = 1500;
 /** 技能缓存目录(折叠详情/会话 Cookie 等;统一改这里即可换缓存位置) */
 const TEST_CACHE_DIR = `${process.env.TMPDIR || "/tmp"}/websearch-test-${process.pid}`;
 export const CACHE_DIR = process.env.WEBSEARCH_CACHE_DIR ||
-  (process.env.NODE_TEST_CONTEXT ? TEST_CACHE_DIR : `${process.env.HOME || process.env.TMPDIR || "/tmp"}/.cache`);
+  (process.env.NODE_TEST_CONTEXT
+    ? TEST_CACHE_DIR
+    : USER_CONFIG.cache?.directory || `${process.env.HOME || process.env.TMPDIR || "/tmp"}/.cache`);
 /** Cookie 持久化文件(跨 CLI 运行共享,模拟"老访客"降低风控判定) */
 export const COOKIE_FILE = `${CACHE_DIR}/websearch-cookies.json`;
 /** 引擎失败记忆持久化文件(跨 CLI 运行:失败的引擎进入冷却期,后续搜索直接跳过,
@@ -64,12 +67,14 @@ export const PROBE_TIMEOUT_MS = 2_000;
 export const COOKIE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // ---- 调度 ----
+/** 默认搜索目标上限。保持固定,不暴露为用户配置,临时覆盖只允许 CLI --limit。 */
+export const DEFAULT_SEARCH_LIMIT = 99;
 /** 整条降级链硬预算:一次搜索最多等这么久 */
-export const TOTAL_BUDGET_MS = 40_000;
+export const TOTAL_BUDGET_MS = envNumber("WEBSEARCH_TOTAL_BUDGET_MS", USER_CONFIG.network?.totalBudgetMs ?? 40_000);
 /** 聚合时单个引擎的独立超时上限:慢引擎(如 github 原生 fetch 无超时、网络不稳)
  * 挂起时快速放弃,避免等满 TOTAL_BUDGET_MS 拖慢聚合(实测 github 曾拖 39997ms)。
  * 直连引擎自身超时(HTTP_TIMEOUT_MS=10s) + 余量;浏览器兜底引擎不受此限(searx 已排除聚合) */
-export const PER_ENGINE_TIMEOUT_MS = 12_000;
+export const PER_ENGINE_TIMEOUT_MS = envNumber("WEBSEARCH_PER_ENGINE_TIMEOUT_MS", USER_CONFIG.network?.perEngineTimeoutMs ?? 12_000);
 
 // ---- 浏览器兜底 ----
 /** 浏览器渲染总超时(聚合预算一部分):无梯子/实例慢时快速失败,不阻塞聚合 */
@@ -86,9 +91,11 @@ export const ZD_SOLVER_TIMEOUT_MS = 75_000;
 export const ARCHIVE_WAYBACK_TIMEOUT_MS = 12_000;
 export const ARCHIVE_TODAY_TIMEOUT_MS = 8_000;
 /** 页面级缓存 TTL:同一 URL 重复抓取秒回,CF 站点冷启动 9s → 热请求 0s */
-export const PAGE_CACHE_TTL_MS = 6 * 3600 * 1000;
+export const PAGE_CACHE_TTL_MS = envNumber("WEBSEARCH_PAGE_CACHE_TTL_MS", USER_CONFIG.cache?.pageTtlMs ?? 6 * 3600 * 1000);
 /** 库模式(page.goto)导航超时 */
-export const NAV_TIMEOUT_MS = 20_000;
+export const NAV_TIMEOUT_MS = envNumber("WEBSEARCH_NAV_TIMEOUT_MS", USER_CONFIG.browser?.navigationTimeoutMs ?? 20_000);
+/** 用户配置浏览器路径;环境变量仍在 browser-runtime 中优先。 */
+export const BROWSER_PATH = USER_CONFIG.browser?.path || "";
 /** 浏览器 profile 目录前缀(CLI 随机后缀防并发锁,库模式固定 shared) */
 export const BROWSER_PROFILE_PREFIX = "wschromium";
 /** 浏览器兜底调试日志:CLI 失败时完整 stderr/退出码/命令行落盘(替代只留 80 字符的截断报错) */
@@ -151,7 +158,8 @@ export const SOGOU_COOLDOWN_MS = 5 * 60_000;
 
 // ---- 语义嵌入与聚类(embed.mjs / cluster.mjs) ----
 /** 默认嵌入模型(中文优先,bge-small-zh 中文区分度实测最佳;中英均衡可换 multilingual-e5-small) */
-export const EMBED_MODEL = "Xenova/bge-small-zh-v1.5";
+export const EMBED_BACKEND = process.env.WEBSEARCH_EMBED_BACKEND || USER_CONFIG.semantic?.backend || "auto";
+export const EMBED_MODEL = process.env.WEBSEARCH_EMBED_MODEL || USER_CONFIG.semantic?.localModel || "Xenova/bge-small-zh-v1.5";
 /** 与簇心余弦 ≥ 此值才归簇;低于 → 自成簇/噪声(e5-small 同主题中文文档余弦约 0.5~0.7) */
 export const CLUSTER_SIM_THRESHOLD = 0.42;
 /** 与簇心余弦 ≥ 此值视为近似重复(转载/镜像页),簇内折叠计数 */
@@ -173,14 +181,14 @@ export const MAX_BUCKET_SIZE = envNumber("WEBSEARCH_MAX_BUCKET_SIZE", 6);
 
 // ---- 语义嵌入 API 后端(OpenAI 兼容,如硅基流动) ----
 /** API 基址(硅基流动;可换其它 OpenAI 兼容提供商) */
-export const EMBED_API_BASE = process.env.SILICONFLOW_API_BASE || "https://api.siliconflow.cn/v1";
+export const EMBED_API_BASE = process.env.SILICONFLOW_API_BASE || USER_CONFIG.semantic?.apiBase || "https://api.siliconflow.cn/v1";
 /** API 嵌入模型(默认 MTEB 多语言榜首 Qwen3-Embedding-8B,4096 维;也可换 BAAI/bge-m3) */
-export const EMBED_API_MODEL = process.env.SILICONFLOW_EMBED_MODEL || "Qwen/Qwen3-Embedding-8B";
+export const EMBED_API_MODEL = process.env.SILICONFLOW_EMBED_MODEL || USER_CONFIG.semantic?.apiModel || "Qwen/Qwen3-Embedding-8B";
 /** API 嵌入输出维度压缩(MRL,`dimensions` 参数):实测 4096→1024 相似度误差 <0.005
  * (报道↔指南 0.903↔0.906),分布不变 → 聚类阈值无需调整;存储/计算省 4 倍
  * (UPGMA pairwise 等 O(n²)×dim 热点)。0 = 不压缩(4096 全维);
  * 不支持的提供商(400/422)自动去掉该参数重试。 */
-export const EMBED_API_DIMENSIONS = envNumber("EMBED_API_DIMENSIONS", 1024);
+export const EMBED_API_DIMENSIONS = envNumber("EMBED_API_DIMENSIONS", USER_CONFIG.semantic?.apiDimensions ?? 1024);
 /** API 后端聚类相似度阈值(实测 Qwen3-8B:同主题 0.58~0.72 vs 异主题 0.32~0.45,0.5 安全分离) */
 export const EMBED_API_SIM_THRESHOLD = 0.5;
 /** 簇相关度低于此 → 标记 lowRelevance(广告/垃圾簇沉底提示) */
@@ -197,7 +205,7 @@ export const SEM_NOISE_THRESHOLD = envNumber("WEBSEARCH_SEM_NOISE", 0.32);
 // 阈值自适应:基于当前结果集最高语义分(top)的比例 + 绝对下限双保险,
 // 避免模型/语言漂移导致固定阈值失真(实测 Qwen3:相关 0.59 vs 词典 0.36)。
 /** 分级模式:balanced=默认三档;aggressive=边缘/无关折叠为单行汇总;conservative=只排序不折叠 */
-export const REL_MODE = process.env.WEBSEARCH_REL_MODE || "balanced";
+export const REL_MODE = process.env.WEBSEARCH_REL_MODE || USER_CONFIG.semantic?.relevanceMode || "balanced";
 /** 相关区:rel ≥ max(REL_RELEVANT_MIN, top×REL_RELEVANT_RATIO) */
 export const REL_RELEVANT_MIN = 0.5;
 export const REL_RELEVANT_RATIO = 0.6;
@@ -215,7 +223,7 @@ export const REP_FILE = `${CACHE_DIR}/websearch-domain-rep.json`;
 /** 冷启动:样本数低于此不干预(避免少量样本误伤,学习期先观察) */
 export const REP_MIN_SAMPLES = 3;
 /** 信誉分 → quality 乘性因子映射斜率:score 0.5→1.0,0→0.35,1→1.15(clamp 后) */
-export const REP_STRENGTH = envNumber("WEBSEARCH_REP_STRENGTH", 1.6);
+export const REP_STRENGTH = envNumber("WEBSEARCH_REP_STRENGTH", USER_CONFIG.reputation?.strength ?? 1.6);
 /** 超过此天数未见的域名开始向中性 0.5 回归(站点改版/换人运营的宽容期) */
 export const REP_DECAY_START_DAYS = 30;
 /** 超过此天数未见 → 完全中性(0.5,零影响) */

@@ -162,6 +162,21 @@ test("聚合: URL 去重(www 变体)+ 主引擎优先 + src 标记", async () =>
 });
 
 
+test("聚合: 相同标题但不同 URL 全部保留,交给可恢复转载折叠", async () => {
+  resetEngineFailState();
+  const bing = mockEngine("bing", [{ title: "同一发布标题", url: "https://source.example/a", desc: "原文" }]);
+  const searx = mockEngine("searx", [{ title: "同一发布标题", url: "https://mirror.example/b", desc: "镜像" }]);
+  const r = await aggregateSearch(
+    { bing: bing.engine, searx: searx.engine },
+    "same title",
+    10,
+    ["bing", "searx"],
+    Date.now() + 60_000,
+  );
+  assert.deepEqual(r.results.map((x) => x.url), ["https://source.example/a", "https://mirror.example/b"]);
+});
+
+
 test("聚合: 语言过滤(英文查询跳过 zhOnly,中文查询跳过 enOnly)", async () => {
   resetEngineFailState();
   const zh = mockEngine("baidu", [{ title: "中", url: "https://zh.com/", desc: "" }], { zhOnly: true });

@@ -29,6 +29,7 @@ import { searchSearx } from "./searx.mjs";
 import { searchChinaso } from "./chinaso.mjs";
 import { searchBingViaBrowser } from "./bing-browser.mjs";
 import { searchMarginaliaViaBrowser } from "./marginalia-browser.mjs";
+import { USER_CONFIG } from "../user-config.mjs";
 
 /** key → 实现函数(所有可被 search/fallbacks 引用的引擎都必须在此注册) */
 export const ENGINE_IMPLS = {
@@ -84,28 +85,42 @@ const CONF_FILE = fileURLToPath(new URL("../engines.conf.json", import.meta.url)
  * @param {string} [confPath] 配置路径(默认正式配置;测试可注入临时文件)
  * @returns {Object<string, {label:string, search:Function, fallbacks:Array<{label:string, fn:Function}>}>}
  */
-export function loadEngines(confPath = CONF_FILE) {
+export function loadEngines(confPath = CONF_FILE, userConfig = USER_CONFIG.engines || {}) {
   const raw = JSON.parse(readFileSync(confPath, "utf8"));
   const engines = raw?.engines;
   if (!engines || typeof engines !== "object") {
     throw new Error("engines.conf.json 缺少 engines 字段");
   }
+  const knownKeys = Object.keys(engines);
+  for (const key of [...(userConfig.disabled || []), ...(userConfig.order || []), userConfig.default].filter(Boolean)) {
+    if (!engines[key]) throw new Error(`用户配置引用未知引擎: ${key}`);
+  }
+  const disabled = new Set(userConfig.disabled || []);
+  const enabledKeys = knownKeys.filter((key) => !disabled.has(key));
+  if (enabledKeys.length === 0) throw new Error("用户配置禁用了全部搜索引擎");
+  const orderedKeys = [
+    ...(userConfig.order || []).filter((key) => !disabled.has(key)),
+    ...enabledKeys.filter((key) => !(userConfig.order || []).includes(key)),
+  ];
   const out = {};
-  const allKeys = Object.keys(engines); // 先收集全部 key,供 "all" 聚合展开
-  for (const [key, cfg] of Object.entries(engines)) {
+  for (const key of orderedKeys) {
+    const cfg = engines[key];
     const search = ENGINE_IMPLS[cfg?.search];
     if (!search) throw new Error(`引擎 "${key}" 的 search "${cfg?.search}" 未在 ENGINE_IMPLS 注册`);
     const fallbacks = [];
     for (const f of cfg?.fallbacks || []) {
       const fn = ENGINE_IMPLS[f];
       if (!fn) throw new Error(`引擎 "${key}" 的 fallback "${f}" 未在 ENGINE_IMPLS 注册`);
+      if (disabled.has(f)) continue;
       fallbacks.push({ label: ENGINE_LABELS[f] || f, fn });
     }
     // 聚合伙伴:["all"] 展开为“除自身与专用引擎外全部”(保持声明序,行为与手写列表等价);
     // 显式列表则原样使用(如 cnnews 只聚合 bing/baidu/github)
     let aggregateWith = cfg.aggregateWith || [];
     if (aggregateWith.includes("all")) {
-      aggregateWith = allKeys.filter((k) => k !== key && !AGGREGATE_EXCLUDE.has(k));
+      aggregateWith = orderedKeys.filter((k) => k !== key && !AGGREGATE_EXCLUDE.has(k));
+    } else {
+      aggregateWith = aggregateWith.filter((partner) => !disabled.has(partner));
     }
     out[key] = { label: cfg.label || key, search, fallbacks, aggregateWith, zhOnly: !!cfg.zhOnly, enOnly: !!cfg.enOnly, pageLimit: cfg.pageLimit || 10, host: cfg.host || "" };
     // 校验聚合伙伴已注册(声明式完整性)
@@ -114,4 +129,13 @@ export function loadEngines(confPath = CONF_FILE) {
     }
   }
   return out;
+}
+
+export function defaultEngineKey(engines, userConfig = USER_CONFIG.engines || {}) {
+  if (userConfig.default) {
+    if (!engines[userConfig.default]) throw new Error(`默认引擎不可用: ${userConfig.default}`);
+    return userConfig.default;
+  }
+  if (engines.bing) return "bing";
+  return Object.keys(engines)[0];
 }

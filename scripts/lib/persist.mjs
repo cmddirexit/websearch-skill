@@ -10,9 +10,10 @@
  *   websearch-page-cache/<sha1>.json 页面提取结果缓存(6h TTL)
  *   websearch-browser-debug.log  CLI 失败完整 stderr 诊断
  */
-import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { CACHE_DIR, BROWSER_DEBUG_LOG, PAGE_CACHE_TTL_MS } from "./config.mjs";
+import { atomicWriteJsonSync } from "./state-file.mjs";
 
 /* ---------- URL 小工具(与业务解耦,后续可独立成 url-utils) ---------- */
 
@@ -50,7 +51,7 @@ export function markCfHost(host, baseDir = CACHE_DIR) {
     }
     if (!arr.includes(host)) {
       arr.push(host);
-      writeFileSync(cfSitesFile(baseDir), JSON.stringify(arr));
+      atomicWriteJsonSync(cfSitesFile(baseDir), arr);
     }
   } catch { /* 落盘失败不影响主流程 */ }
 }
@@ -84,7 +85,7 @@ export function pageCachePut(url, r, baseDir = CACHE_DIR) {
   try {
     const dir = `${baseDir}/websearch-page-cache`;
     mkdirSync(dir, { recursive: true });
-    writeFileSync(`${dir}/${pageCacheKey(url)}.json`, JSON.stringify({ savedAt: Date.now(), r }));
+    atomicWriteJsonSync(`${dir}/${pageCacheKey(url)}.json`, { savedAt: Date.now(), r });
   } catch { /* 缓存写失败不影响主流程 */ }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: websearch
-description: 网络搜索与网页正文提取。支持 bing(中文/英文通用)、baidu(中文)、sogou(中文)、sogou-wechat(微信公众号文章)、so360(360搜索·中文)、sm(神马搜索·中文)、toutiao(头条搜索·中文)、marginalia(英文独立索引)、hn(Hacker News 技术讨论)、github(代码仓库)、wikipedia(英文百科)、searx(SearXNG 聚合含 Google)、chinaso(中国搜索·官方 JSON API)十三个搜索引擎,无需 API key。搜索返回结构化结果(标题/摘要/链接),fetch 命令提取网页正文。直连被反爬时自动走降级链(含 Chromium 浏览器兜底——searx/ddg/mojeek/yandex 等验证页实测只有无头浏览器能过)。适用于实时信息、新闻、技术文档、价格行情等任何网络检索需求。详细文档见同目录 README.md。
+description: 网络搜索与网页正文提取。支持 bing(中文/英文通用)、baidu(中文)、sogou(中文)、sogou-wechat(微信公众号文章)、so360(360搜索·中文)、sm(神马搜索·中文)、toutiao(头条搜索·中文)、marginalia(英文独立索引)、hn(Hacker News 技术讨论)、github(代码仓库)、wikipedia(英文百科)、searx(SearXNG 聚合含 Google)、cnnews(官方新闻源)、chinaso(中国搜索·官方 JSON API)十四个搜索引擎,无需 API key。搜索返回结构化结果(标题/摘要/链接),fetch 命令提取网页正文。直连被反爬时自动走降级链(含 Chromium 浏览器兜底——searx/ddg/mojeek/yandex 等验证页实测只有无头浏览器能过)。适用于实时信息、新闻、技术文档、价格行情等任何网络检索需求。详细文档见同目录 README.md。
 metadata:
   license: MIT
 ---
@@ -47,7 +47,7 @@ node scripts/websearch.mjs timeline "美伊冲突" --limit 8
 - **找近期新闻/大事时加 `--since 1w|1m`**:硬剔除旧闻、资料、模板(豆丁/高考时政/PPT 类),
   比默认的"旧文沉底"更彻底;无日期结果保守保留(无法判断不误杀)
 - **复杂事件(冲突/局势/连续剧式事件)用 `timeline` 串时间线**,不要逐篇 fetch
-- **默认不指定引擎**:自动聚合 bing+baidu+sogou+so360+sm+toutiao(中文)+marginalia/hn/github(英文)共 11 引擎;
+- **默认不指定引擎**:自动聚合 bing+baidu+sogou+sogou-wechat+so360+sm+toutiao+marginalia+hn+github+wikipedia 共 11 引擎;
   只有特殊需求才传 `--engine`(cnnews 官方新闻白名单 / github 代码 / wikipedia 百科 / hn 技术讨论),不要因为"中文"或"英文"指定引擎
 - 聚类输出看前几个簇即可;低相关折叠区用 `reveal` 展开,URL 永不丢
 
@@ -97,8 +97,10 @@ node scripts/websearch.mjs timeline "美伊冲突" --limit 8
 ## 调试 / 测试(维护者用)
 
 - 降级日志:输出里 `grep '[degrade]'`
-- 调参:环境变量 + `scripts/lib/config.mjs`(全量参数表见 README「配置与环境变量」)
-- 测试:`cd ~/.pi/agent/skills/websearch && npm test`(246 用例)
+- 常用配置:复制 `websearch.config.example.json` 为 `websearch.config.json`;优先级为命令行 > 环境变量 >
+  用户配置 > 内置默认值。密钥只放环境变量/`.env.json`,默认搜索上限固定 99
+- 算法调参:`scripts/lib/config.mjs`(全量参数表见 README「配置与环境变量」)
+- 测试:`cd ~/.pi/agent/skills/websearch && npm test`
 - 站点改版回归:`npm run fixtures` 重抓真实页快照,仍失败则更新解析器
 
 ## 更多

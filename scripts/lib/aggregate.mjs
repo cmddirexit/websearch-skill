@@ -11,8 +11,8 @@
  *    含 CJK 字符视为中文查询
  *  - 并行 Promise.allSettled:单引擎失败/超时不阻塞其它引擎,聚合永不因单点失败而全挂
  *  - 主引擎结果原序在前(质量最高),补充引擎按声明顺序、去重后接在后面
- *  - 去重:URL 规范化(去 www./m. 前缀、去尾斜杠、去 utm/tracking 参数)后精确匹配;
- *    标题归一化(空白压缩)相同的也视为重复(同一页面不同镜像域名)
+ *  - 去重:只按规范化 URL 精确匹配。相同标题可能是不同页面/版本,保留到语义转载
+ *    折叠阶段处理,以便 duplicateItems 仍可恢复每个 URL
  *  - 每引擎分配 ceil(limit/引擎数) 条(上限 10=引擎单页硬限),整条链路受 deadline 预算约束
  */
 
@@ -163,7 +163,7 @@ export async function aggregateSearch(engines, query, limit, partners, deadline,
       sources: [], counts,
     };
   }
-  // 主引擎优先保序,补充引擎按声明顺序;URL/标题精确去重。
+  // 主引擎优先保序,补充引擎按声明顺序;只做 URL 精确去重。
   // 近似转载(换措辞/同源改写)不再在此硬丢弃 —— 由 cluster.mjs 语义转载折叠
   // (向量余弦 + 文本证据,软折叠保留 URL)处理,字符 LCS 硬过滤已移除(误杀风险)。
   // 目标条数可能因 pageLimit 未满(如 bing 10 < 均分 25):此时补充引擎继续抓满差值
@@ -174,10 +174,8 @@ export async function aggregateSearch(engines, query, limit, partners, deadline,
     for (let sourceIndex = 0; sourceIndex < list.length; sourceIndex++) {
       const r = list[sourceIndex];
       const ukey = normalizeUrl(r.url);
-      const tkey = normalizeTitle(r.title);
-      if (seen.has(ukey) || seen.has(`t:${tkey}`)) continue;
+      if (seen.has(ukey)) continue;
       seen.add(ukey);
-      seen.add(`t:${tkey}`);
       // 保留来源内名次。聚合数组仍按主引擎优先拼接,但相关性评分不能把补充
       // 引擎的第 1 名误当成全局第 11/21 名。
       merged.push({ ...r, src: key, sourceRank: sourceIndex + 1, sourceCount: list.length });
