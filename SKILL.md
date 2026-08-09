@@ -101,6 +101,14 @@ node scripts/websearch.mjs timeline "美伊冲突" --limit 8
 - 回测: `node scripts/backtest-meta.mjs` 使用真实训练事件做按域名 5-fold 与时间留出验证;
   事件不足会明确失败
 
+## 内容质量证据链(零词表,自动)
+
+fetch 回写内容证据时三级裁决:`结构(重复行/营销短语/标题覆盖/句长均匀)` →
+`语义(标题-正文嵌入余弦,标题党)` → `贝叶斯(历史标注自举)`。全模棱两可则中性不训练。
+贝叶斯需积累 ≥40 有效样本(正负各 ≥10)才启用,期间静默降级;训练只用独立证据源,
+自身预测不训练自己。详细阈值/调参见 README「内容质量证据链」;实现:`evidence-chain.mjs`
+(裁决)+ `content-bayes.mjs`(分类器)+ `semantic-evidence.mjs`(语义)。
+
 ## 调试 / 测试(维护者用)
 
 - 降级日志:输出里 `grep '[degrade]'`

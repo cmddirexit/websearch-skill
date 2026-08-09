@@ -278,6 +278,44 @@ node scripts/backtest-meta.mjs
 脚本输出按域名隔离的 5-fold 验证和时间后 20% 留出验证，包括 Brier score、低质召回率和
 正常内容误伤率。事件不足时会明确失败，不会用构造样例冒充效果验证。
 
+### 内容质量证据链（零词表）
+
+`fetch` 回写内容证据时按三级裁决，任一命中即止，全部模棱两可则保持中性（不训练）：
+
+```
+结构证据(规则) → 语义证据(嵌入一致性) → 贝叶斯(历史标注自举)
+```
+
+**1. 结构证据**（`content-evidence.mjs`，纯规则、同步、零依赖）
+
+- 重复行比例 ≥45% → 模板拼接(0.2)；营销短语 ≥3 且短文/重复 → 推广文(0.15)；
+  标题覆盖 <8% → 文不对题(0.25)
+- 实质长文（≥1200 字符且标题覆盖≥25%）→ 0.82；短对齐文 → 0.72（置信度更低）
+- 句长均匀性两级触发：CV<0.1（机械等长句，只能模板/机器产生）→ 独立弱负(0.35)；
+  CV<0.25 且叠加营销词或低标题覆盖 → 组合弱负(0.35)。经真实样本标定：
+  人类条列式文章 CV≈0.21~0.32 不误伤，机械模板 CV≈0.02 命中
+
+**2. 语义证据**（`semantic-evidence.mjs`，标题-正文嵌入余弦，零词表标题党检测）
+
+- 复用 `embed.mjs` API 嵌入，余弦 <0.4 → 标题党弱负证据(0.25)，置信度随错位加深
+- 嵌入不可用（无 key/本地模型）→ null 静默降级，不拖慢 fetch；只产负证据，
+  高相似度交给结构证据判断
+
+**3. 内容贝叶斯**（`content-bayes.mjs`，自举分类器，最终兜底）
+
+- 特征 = 中文 bigram + 英文词（零人工词表）；推理取最偏离 0.5 的 K 个 token 合成
+  （Paul Graham 风格），Laplace 平滑治长尾
+- 训练只用独立证据源（结构/语义/LLM 标签）；贝叶斯自身预测（`bayes-v1`）不训练自己，
+  防自反馈循环
+- 成熟门槛：有效样本 ≥40 且正/负类各 ≥10，未成熟时静默降级（预测返回 null）
+- 持久化 `~/.cache/websearch-content-bayes.json`（token 计数 + 去重 ID，损坏则冷启动）
+
+调参（环境变量）：`WEBSEARCH_BAYES_MIN_SAMPLES`(40)、`WEBSEARCH_BAYES_MIN_CLASS_SAMPLES`(10)、
+`WEBSEARCH_BAYES_TOP_K`(15)；语义阈值在 `semantic-evidence.mjs` 顶部常量。
+
+证据链裁决抽离在 `evidence-chain.mjs`（`resolveContentEvidence` / `trainBayes`），
+bayes 与嵌入函数可注入，便于单测与扩展新证据源。
+
 ## 可靠性与降级
 
 搜索侧使用总预算和单引擎超时，并行收集可用结果。连续失败的引擎会进入冷却期，成功后自动
@@ -350,7 +388,17 @@ const clusters = clusterResults(kept, "Node.js streams");
 }
 ```
 
-公共导出集中在 `scripts/lib/index.mjs`。
+公共导出集中在 `scripts/lib/index.mjs`。内容质量证据链也可作为库复用：
+
+```js
+import {
+  assessContentEvidence,      // 结构证据(纯规则,同步)
+  assessSemanticEvidence,     // 语义证据(标题-正文嵌入余弦,异步)
+  createContentBayes,         // 内容贝叶斯实例(可注入 file 隔离持久化)
+  resolveContentEvidence,     // 证据链裁决:结构→语义→贝叶斯
+  trainBayes,                 // 贝叶斯训练编排(独立证据源,防自反馈)
+} from "websearch-skill";
+```
 
 ## 扩展引擎
 

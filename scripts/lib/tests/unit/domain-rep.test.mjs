@@ -497,7 +497,11 @@ test("meta: 无 LLM 正文结构证据可生成正负独立标签", () => {
 test("meta: fetch 主流程在 LLM 关闭时使用本地正文证据,模棱两可时只记可用性", async () => {
   process.env.WEBSEARCH_LLM_OFF = "1";
   try {
-    const rep = createDomainReputation({ file: null, bayes: createContentBayes({ file: null }) });
+    const rep = createDomainReputation({
+      file: null,
+      bayes: createContentBayes({ file: null }),
+      embedFn: async () => null, // 测试注入:语义嵌入不可用,跳过 API 调用
+    });
     const body = `Node.js 流式处理教程\n${"本文给出可运行代码，解释背压、错误传播和资源释放，并逐步验证输出结果。".repeat(25)}`;
     const evidence = await rep.learnFetchContent("https://docs.example/tutorial/stream", {
       title: "Node.js 流式处理教程",

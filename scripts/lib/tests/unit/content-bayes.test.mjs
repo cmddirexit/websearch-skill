@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createContentBayes, bodyTokens, clamp } from "../../content-bayes.mjs";
+import { createContentBayes, bodyTokens } from "../../content-bayes.mjs";
+import { clamp } from "../../rep-score.mjs";
 
 // ---- 工具 ----
 

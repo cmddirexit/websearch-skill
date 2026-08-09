@@ -60,7 +60,10 @@ export { clusterResults, queryTokens, titleTokens, tokenJaccard, cnGrams, enWord
 export { filterResults, detectFlags, scoreQuality, isAdResult, hasAdMarker, isAdDomain, isShortener, isRedirectAdUrl, AD_DOMAINS, SHORTENER_DOMAINS, AD_REDIRECT_SEGMENTS, AD_MARKER_STRONG } from "./filter.mjs";
 // 域名信誉评分 + 增量学习(软限制:按搜索结果与 fetch 实测给域名评分,学习规律后降权不剔除)
 export { createDomainReputation, registrableHost, repKeys, contributionFromQuality, updateScore, updateFetchScore, updateAvailabilityScore, updateUtilityScore, effectiveScore, availabilityFactor, utilityFactor, decayedScore, repFactor, repBadge, clamp, CONTENT_LOW_FLAGS, ENGINE_DOMAINS, FUNCTIONAL_PATH_SEGS, cnBigrams, enWords as repEnWords, urlTokens, flagTokens, extractLearnFeatures, titleFlagTokens, normalizedFeatureVector, predictTokens, updateMetaTokens, metaReady } from "./domain-rep.mjs";
-export { assessContentEvidence } from "./content-evidence.mjs";
+export { assessContentEvidence, sentenceStats } from "./content-evidence.mjs";
+export { assessSemanticEvidence, cosine as semanticCosine } from "./semantic-evidence.mjs";
+export { createContentBayes, contentBayes, bodyTokens } from "./content-bayes.mjs";
+export { resolveContentEvidence, trainBayes } from "./evidence-chain.mjs";
 export { judgeResults, llmConfig } from "./llm-judge.mjs";
 export { embedResults, embedTexts, getEmbedder, resetEmbedder } from "./embed.mjs";
 export {

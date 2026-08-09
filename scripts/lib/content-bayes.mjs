@@ -28,11 +28,10 @@ import {
   CACHE_DIR, BAYES_MIN_SAMPLES, BAYES_MIN_CLASS_SAMPLES, BAYES_TOP_K, BAYES_PREDICT_THR,
 } from "./config.mjs";
 import { cnBigrams, enWords } from "./rep-features.mjs";
+import { clamp } from "./rep-score.mjs";
 
 const BAYES_FILE = `${CACHE_DIR}/websearch-content-bayes.json`;
 const SCHEMA_VERSION = 1;
-
-export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /** 正文 → token 集(中文 bigram + 英文词/数字)。截前 maxChars 字符,
  * bigram 覆盖正文主题词,英文词覆盖技术/品牌词;去空白压缩长度。 */
