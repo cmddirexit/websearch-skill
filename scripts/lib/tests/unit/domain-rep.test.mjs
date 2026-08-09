@@ -5,10 +5,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  registrableHost, repKeys, contributionFromQuality, updateScore, updateFetchScore, effectiveScore, decayedScore,
-  repFactor, repBadge, clamp, createDomainReputation,
-  cnBigrams, enWords, urlTokens, flagTokens, extractLearnFeatures, titleFlagTokens, predictTokens, updateMetaTokens,
+  registrableHost, repKeys, contributionFromQuality, updateScore, updateFetchScore, updateUtilityScore, effectiveScore, decayedScore,
+  repFactor, repBadge, utilityFactor, clamp, createDomainReputation,
+  cnBigrams, enWords, urlTokens, flagTokens, extractLearnFeatures, titleFlagTokens, normalizedFeatureVector, predictTokens, updateMetaTokens, metaReady,
 } from "../../domain-rep.mjs";
+import { assessContentEvidence } from "../../content-evidence.mjs";
 
 
 test("rep: 注册域名去 www、折叠子域,失败/引擎域返回空串", () => {
@@ -64,7 +65,7 @@ test("rep: 平滑更新收敛到贡献值,学习率随样本数递减", () => {
 
 test("rep: 时间衰减 — 30 天内不变,90 天完全中性", () => {
   const now = Date.now();
-  const entry = { searchScore: 0.2, fetchScore: 0.5, searchSamples: 10, lastSeen: now };
+  const entry = { searchScore: 0.2, contentScore: 0.5, searchSamples: 10, lastSeen: now };
   assert.equal(decayedScore(entry, now), 0.2, "刚见过不衰减");
   assert.equal(decayedScore(entry, now + 29 * 86_400_000), 0.2, "30 天内零衰减");
   const mid = decayedScore(entry, now + 60 * 86_400_000);
@@ -81,6 +82,18 @@ test("rep: 信誉因子映射 — 0.5→1,0→0.35,1→1.15;冷启动不干预",
   assert.equal(repFactor(0, 1), 1, "样本不足(冷启动)零干预");
   assert.equal(repFactor(0, 2), 1);
   assert.equal(repFactor(0.5, 3), 1);
+});
+
+test("rep: 主动选择使用价值至少三次才生效,并封顶 3%", () => {
+  const entry = { utilityScore: 0, utilitySamples: 0 };
+  updateUtilityScore(entry);
+  updateUtilityScore(entry);
+  assert.equal(utilityFactor(entry), 1);
+  updateUtilityScore(entry);
+  assert.ok(utilityFactor(entry) > 1 && utilityFactor(entry) < 1.03);
+  for (let i = 0; i < 20; i++) updateUtilityScore(entry);
+  assert.equal(entry.utilityScore, 1);
+  assert.equal(utilityFactor(entry), 1.03);
 });
 
 
@@ -116,6 +129,42 @@ test("rep: 从搜索结果学习 — 低质域名降分,干净域名保持;ad: �
   assert.ok(lu && lu.samples >= 1 && lu.factor === 1, "冷启动零干预");
 });
 
+test("rep: 重复搜索结果和同日抓取状态不冒充独立样本", () => {
+  const rep = createDomainReputation({ file: null });
+  const result = { title: "同一篇文章", url: "https://repeat.example/article/1", flags: [], quality: 1 };
+  rep.learnFromResults([result]);
+  rep.learnFromResults([result]);
+  assert.equal(rep._raw()["repeat.example"].searchSamples, 1);
+  rep.learnFetch(result.url, false);
+  rep.learnFetch(result.url, false);
+  assert.equal(rep._raw()["repeat.example"].availabilitySamples, 1);
+});
+
+test("rep: 主动 fetch 选择按 URL/日期去重,只微升 utility 而不污染质量模型", () => {
+  const rep = createDomainReputation({ file: null });
+  const beforeMeta = rep._meta().weightSamples;
+  rep.learnSelection("https://useful.example/articles/1");
+  rep.learnSelection("https://useful.example/articles/1");
+  assert.equal(rep._raw()["useful.example"].utilitySamples, 1, "同 URL 同日只计一次");
+  assert.equal(rep.lookup("https://useful.example/articles/next").factor, 1, "一次选择不影响排序");
+
+  rep.learnSelection("https://useful.example/articles/2");
+  assert.equal(rep.lookup("https://useful.example/articles/next").factor, 1, "两次选择仍不影响排序");
+  rep.learnSelection("https://useful.example/articles/3");
+  const selected = rep.lookup("https://useful.example/articles/next");
+  assert.ok(selected.factor > 1 && selected.factor <= 1.03, JSON.stringify(selected));
+  assert.equal(selected.score, 0.5, "选择行为不改变内容信誉分");
+  assert.equal(selected.samples, 0, "选择行为不冒充内容/搜索样本");
+  assert.equal(selected.utilitySamples, 3);
+  assert.equal(rep._raw()["useful.example"].contentScore, 0.5);
+  assert.equal(rep._raw()["useful.example"].availabilityScore, 0.5);
+  assert.equal(rep._meta().weightSamples, beforeMeta, "选择行为不训练跨域模型");
+  assert.equal(rep._events().length, 0, "选择行为不生成训练事件");
+
+  for (let i = 4; i <= 20; i++) rep.learnSelection(`https://useful.example/other/${i}`);
+  assert.equal(rep.lookup("https://useful.example/new").factor, 1.03, "使用价值最多提升 3%");
+});
+
 
 test("rep: 重复低质模式惩罚 — 稳定低质率>60% 的域名持续降档(学习规律)", () => {
   const rep = createDomainReputation({ file: null });
@@ -141,17 +190,19 @@ test("rep: 重复低质模式惩罚 — 稳定低质率>60% 的域名持续降�
 });
 
 
-test("rep: fetch 实测反馈 — 最强信号,空壳域名快速降分", () => {
+test("rep: 抓取可用性与内容质量分离 — 空壳不污染内容模型", () => {
   const rep = createDomainReputation({ file: null });
   rep.learnFetch("https://seo-shell.com/p/1", false);
   rep.learnFetch("https://seo-shell.com/p/2", false);
   rep.learnFetch("https://seo-shell.com/p/3", false);
   const lu = rep.lookup("https://seo-shell.com/p/9");
-  assert.ok(lu && lu.score < 0.25, "3 次 fetch 空 → 信誉<0.25:" + lu?.score);
+  assert.equal(lu.score, 0.5, "空壳只说明不可用,不得判定内容低质");
+  assert.ok(lu.factor < 1 && lu.factor >= 0.75, "重复不可用只做温和降权:" + lu.factor);
   assert.ok(lu.fetchEmpty >= 3);
+  assert.equal(rep._meta().weightSamples, 0, "抓取失败不得训练跨域内容模型");
   rep.learnFetch("https://good.com/p/1", true);
   const lu2 = rep.lookup("https://good.com/p/2");
-  assert.ok(lu2 && lu2.score > 0.7, "fetch 成功 → 高信誉:" + lu2?.score);
+  assert.equal(lu2.score, 0.5, "抓取成功也不等于内容可信");
 });
 
 
@@ -166,12 +217,10 @@ test("rep: 查询低相关折叠不写入全局域名信誉", () => {
 
 test("rep: 软降权应用 — quality 乘因子,低信誉压沉不剔除,冷启动零影响", () => {
   const rep = createDomainReputation({ file: null });
-  rep.learnFetch("https://low.com/a", false);
-  rep.learnFetch("https://low.com/b", false);
-  rep.learnFetch("https://low.com/c", false);
-  rep.learnFetch("https://high.com/a", true);
-  rep.learnFetch("https://high.com/b", true);
-  rep.learnFetch("https://high.com/c", true);
+  for (let i = 0; i < 3; i++) {
+    rep.recordContentEvidence(`https://low.com/article/${i}`, 0.1, { tokens: new Set(["t:低质模板"]), eventKey: `low-${i}` });
+    rep.recordContentEvidence(`https://high.com/article/${i}`, 0.95, { tokens: new Set(["t:深度内容"]), eventKey: `high-${i}` });
+  }
   const results = [
     { title: "低信誉域文章", url: "https://low.com/p/1", quality: 1 },
     { title: "高信誉域文章", url: "https://high.com/p/1", quality: 1 },
@@ -234,15 +283,24 @@ test("rep: 持久化 roundtrip(跨进程增量积累)", () => {
     const r1 = createDomainReputation({ file });
     r1.learnFetch("https://persist.com/a", false);
     r1.learnFetch("https://persist.com/b", true);
+    r1.learnSelection("https://persist.com/selected/1");
+    r1.learnSelection("https://persist.com/selected/2");
+    r1.learnSelection("https://persist.com/selected/3");
     r1.save();
     const r2 = createDomainReputation({ file });
     const lu = r2.lookup("https://persist.com/c");
-    assert.ok(lu && lu.samples === 4 && lu.fetchEmpty === 1 && lu.fetchOk === 1, "状态跨实例读回:" + JSON.stringify(lu));
+    assert.ok(lu && lu.samples === 0 && lu.fetchEmpty === 1 && lu.fetchOk === 1, "可用性状态跨实例读回:" + JSON.stringify(lu));
+    assert.equal(lu.utilitySamples, 3, "使用价值状态跨实例读回");
+    assert.ok(lu.factor > 1, "持久化后的使用价值微升仍生效");
+    r2.learnSelection("https://persist.com/selected/1");
+    assert.equal(r2._raw()["persist.com"].utilitySamples, 3, "重启后同 URL 同日仍去重");
     // 继续积累(不覆盖,增量)
     r2.learnFetch("https://persist.com/d", false);
+    r2.learnSelection("https://persist.com/selected/4");
     r2.save();
     const r3 = createDomainReputation({ file });
-    assert.equal(r3._raw()["persist.com"].searchSamples, 3, "增量积累");
+    assert.equal(r3._raw()["persist.com"].availabilitySamples, 3, "可用性增量积累");
+    assert.equal(r3._raw()["persist.com"].utilitySamples, 4, "使用价值增量积累");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -263,7 +321,29 @@ test("rep: v2 污染模型不迁移到新的证据边界", () => {
     assert.equal(rep._meta().weightSamples, 0, "旧规则自训练权重不得继续用于冷启动");
     rep.learnFromResults([{ title: "正常词典", url: "https://dict.example/a", quality: 1, flags: [] }]);
     rep.save();
-    assert.equal(JSON.parse(readFileSync(file, "utf8")).version, 3, "新证据写回 v3 schema");
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).version, 4, "新证据写回 v4 schema");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rep: v3 只迁移未混入旧 fetch 的域名搜索历史", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsrep-v3-"));
+  const file = join(dir, "rep.json");
+  try {
+    writeFileSync(file, JSON.stringify({
+      version: 3,
+      meta: { weights: { "t:旧权重": -2 }, weightSamples: 100 },
+      domains: {
+        "search-only.example": { searchScore: 0.8, searchSamples: 5, fetchSamples: 0, lastSeen: Date.now() },
+        "mixed-fetch.example": { searchScore: 0.1, searchSamples: 5, fetchSamples: 2, lastSeen: Date.now() },
+      },
+    }));
+    const rep = createDomainReputation({ file });
+    assert.equal(rep.lookup("https://search-only.example/a").score, 0.8);
+    assert.equal(rep.lookup("https://mixed-fetch.example/a"), null);
+    assert.equal(rep._meta().weightSamples, 0);
+    assert.equal(rep._events().length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -303,6 +383,17 @@ test("meta: 预测 — 无权重中性 0.5,权重推动偏离", () => {
   assert.ok(predictTokens(new Set(["t:未知词"]), m) === 0.5, "未见 token 无影响(稀疏泛化)");
 });
 
+test("meta: 特征按通道归一化,域名身份和规则 flag 不进入跨域模型", () => {
+  const vector = normalizedFeatureVector(new Set([
+    "t:a", "t:b", "t:c", "t:d", "u:post", "d:example", "f:spam-desc",
+  ]));
+  assert.equal(vector.get("t:a"), 0.25);
+  assert.equal(vector.get("u:post"), 1);
+  assert.equal(vector.has("d:example"), false);
+  assert.equal(vector.has("f:spam-desc"), false);
+  assert.equal([...vector.entries()].filter(([token]) => token.startsWith("t:")).reduce((sum, [, x]) => sum + x, 0), 1);
+});
+
 
 test("meta: 在线学习 — token 权重从数据中涌现,非硬编码", () => {
   // 模拟真实软文站:标题高度模板化(同一发稿商标题几乎一致),反复低质出现
@@ -332,13 +423,13 @@ test("meta: 在线学习 — token 权重从数据中涌现,非硬编码", () =>
 });
 
 
-test("meta: 冷启动外循环 — 模式成熟后新域名无需自身样本即可预测打分", () => {
+test("meta: 冷启动先验要求正负两类证据,并随域名自身证据平滑淡出", () => {
   const rep = createDomainReputation({ file: null });
   // 模式未成熟(样本 < META_MIN_SAMPLES):新域名无预测(冷启动关闭)
   rep.learnFromResults([{ title: "测试", url: "https://a.com/1", desc: "x", flags: [], quality: 0.9 }]);
   assert.equal(rep.lookup("https://brand-new-domain.com/p/1"), null, "模式未成熟不预测");
-  // 积累 60 个有独立可信度标签的低质软文样本(让模式学出规律)
-  for (let i = 0; i < 60; i++) {
+  // 只有负样本时即使达到总量门槛也不得启用,防默认环境单类投毒。
+  for (let i = 0; i < 30; i++) {
     const url = `https://seo${i}.com/2026/0${i % 9}/t${i}${i}.shtml`;
     const title = `2026年${i}月平台推荐榜测评口碑`;
     rep.record(url, 0.4, {
@@ -347,6 +438,17 @@ test("meta: 冷启动外循环 — 模式成熟后新域名无需自身样本即
       metaLabel: 0.1,
     });
   }
+  assert.equal(metaReady(rep._meta()), false);
+  assert.equal(rep.lookup("https://negative-only.example/post/1", { title: "平台推荐榜测评" }), null);
+  // 加入独立正样本后模型才启用。
+  for (let i = 0; i < 30; i++) {
+    const url = `https://docs${i}.example/tutorial/${i}`;
+    rep.record(url, 0.9, {
+      tokens: extractLearnFeatures(url, { title: `Python异步编程教程实战${i}` }),
+      metaLabel: 0.9,
+    });
+  }
+  assert.equal(metaReady(rep._meta()), true);
   // 全新域名(从未见过):标题带学到的软文模式 → 冷启动预测低分 + 软降权生效
   const cold = rep.lookup("https://brand-new-seo-site.cn/2026/07/t20260712_12345.shtml", { title: "2026年7月信息平台推荐榜测评" });
   assert.ok(cold && cold.coldStart === true, "新域名走冷启动匹配");
@@ -356,10 +458,65 @@ test("meta: 冷启动外循环 — 模式成熟后新域名无需自身样本即
   // 干净的新域名(无软文特征)→ 中性(允许 bias 偏移 ±0.12,60 软文样本会把 bias 稍微拉低)
   const neutral = rep.lookup("https://brand-new-clean-blog.com/p/1", { title: "Python 异步编程详解" });
   assert.ok(neutral && neutral.score >= 0.38 && neutral.score <= 0.62, "无特征新站中性:" + neutral?.score);
-  // 自身样本积累后 → 转入域名级学习(coldStart 消失)
-  rep.learnFromResults([{ title: "Python 异步编程详解", url: "https://brand-new-clean-blog.com/p/1", desc: "完整内容", flags: [], quality: 1 }]);
-  const after = rep.lookup("https://brand-new-clean-blog.com/p/2", { title: "Python 异步编程详解" });
-  assert.ok(after && after.coldStart !== true && after.samples >= 1, "有自身样本后转域名级");
+  // 一条启发式样本后先验不应突然消失,而是渐进融合。
+  rep.learnFromResults([{ title: "2026年7月信息平台推荐榜测评", url: "https://brand-new-seo-site.cn/2026/07/next.shtml", desc: "形式完整", flags: [], quality: 1 }]);
+  const blended = rep.lookup("https://brand-new-seo-site.cn/2026/07/again.shtml", { title: "2026年7月信息平台推荐榜测评" });
+  assert.ok(blended.samples >= 1 && blended.priorWeight > 0, "少量自身样本仍保留先验");
+  assert.ok(blended.factor < 1, "一次形态正常样本不能立即洗掉低质先验:" + JSON.stringify(blended));
+});
+
+test("meta: 训练事件按来源和页面去重并可持久化回放", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsrep-events-"));
+  const file = join(dir, "rep.json");
+  try {
+    const rep = createDomainReputation({ file });
+    const args = { tokens: new Set(["t:模板", "u:post"]), source: "local-content-v1", eventKey: "same-content", confidence: 0.8 };
+    assert.equal(rep.recordContentEvidence("https://a.example/post/1", 0.2, args), true);
+    assert.equal(rep.recordContentEvidence("https://a.example/post/1", 0.2, args), false, "重复证据不重复训练");
+    assert.equal(rep._events().length, 1);
+    assert.equal(rep._meta().weightSamples, 1);
+    rep.save();
+    const loaded = createDomainReputation({ file });
+    assert.equal(loaded._events().length, 1);
+    assert.equal(loaded._meta().weightSamples, 1, "模型由事件回放重建");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("meta: 无 LLM 正文结构证据可生成正负独立标签", () => {
+  const goodBody = `Python 异步编程教程\n${"本节通过具体代码解释事件循环、任务调度和异常处理，并给出可复现实验步骤。".repeat(25)}`;
+  const badBody = `平台推荐榜测评\n${"立即咨询客服，限时优惠，点击咨询免费领取。\n".repeat(12)}`;
+  const good = assessContentEvidence({ title: "Python 异步编程教程", markdown: goodBody });
+  const bad = assessContentEvidence({ title: "平台推荐榜测评", markdown: badBody });
+  assert.ok(good?.label >= 0.65 && good.confidence > 0);
+  assert.ok(bad?.label <= 0.35 && bad.confidence >= 0.5);
+});
+
+test("meta: fetch 主流程在 LLM 关闭时使用本地正文证据,模棱两可时只记可用性", async () => {
+  process.env.WEBSEARCH_LLM_OFF = "1";
+  try {
+    const rep = createDomainReputation({ file: null });
+    const body = `Node.js 流式处理教程\n${"本文给出可运行代码，解释背压、错误传播和资源释放，并逐步验证输出结果。".repeat(25)}`;
+    const evidence = await rep.learnFetchContent("https://docs.example/tutorial/stream", {
+      title: "Node.js 流式处理教程",
+      markdown: body,
+    });
+    assert.equal(evidence?.source, "local-content-v1");
+    assert.equal(rep._raw()["docs.example"].availabilitySamples, 1);
+    assert.equal(rep._raw()["docs.example"].contentSamples, 1);
+    assert.equal(rep._events().length, 1);
+
+    const uncertain = await rep.learnFetchContent("https://neutral.example/a", {
+      title: "普通页面",
+      markdown: "普通页面内容".repeat(30),
+    });
+    assert.equal(uncertain, null);
+    assert.equal(rep._raw()["neutral.example"].availabilitySamples, 1);
+    assert.equal(rep._raw()["neutral.example"].contentSamples, 0);
+  } finally {
+    delete process.env.WEBSEARCH_LLM_OFF;
+  }
 });
 
 

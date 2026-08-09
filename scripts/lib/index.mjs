@@ -59,7 +59,8 @@ export { main, runFetch, cacheFetchResult } from "./cli.mjs";
 export { clusterResults, queryTokens, titleTokens, tokenJaccard, cnGrams, enWords, cosine, cosineMatrix, DEFAULT_OPTIONS, ZH_STOP, BRAND_ALIAS, readableClusterLabel, cleanTitleForLabel, longestCommonSpan, distinctiveSpan, pickSegment, LABEL_SITE_HINTS, EDGE_SEP_RE, SENTENCE_SEP_RE } from "./cluster.mjs";
 export { filterResults, detectFlags, scoreQuality, isAdResult, hasAdMarker, isAdDomain, isShortener, isRedirectAdUrl, AD_DOMAINS, SHORTENER_DOMAINS, AD_REDIRECT_SEGMENTS, AD_MARKER_STRONG } from "./filter.mjs";
 // 域名信誉评分 + 增量学习(软限制:按搜索结果与 fetch 实测给域名评分,学习规律后降权不剔除)
-export { createDomainReputation, registrableHost, repKeys, contributionFromQuality, updateScore, updateFetchScore, effectiveScore, decayedScore, repFactor, repBadge, clamp, CONTENT_LOW_FLAGS, ENGINE_DOMAINS, FUNCTIONAL_PATH_SEGS, cnBigrams, enWords as repEnWords, urlTokens, flagTokens, extractLearnFeatures, titleFlagTokens, predictTokens, updateMetaTokens } from "./domain-rep.mjs";
+export { createDomainReputation, registrableHost, repKeys, contributionFromQuality, updateScore, updateFetchScore, updateAvailabilityScore, updateUtilityScore, effectiveScore, availabilityFactor, utilityFactor, decayedScore, repFactor, repBadge, clamp, CONTENT_LOW_FLAGS, ENGINE_DOMAINS, FUNCTIONAL_PATH_SEGS, cnBigrams, enWords as repEnWords, urlTokens, flagTokens, extractLearnFeatures, titleFlagTokens, normalizedFeatureVector, predictTokens, updateMetaTokens, metaReady } from "./domain-rep.mjs";
+export { assessContentEvidence } from "./content-evidence.mjs";
 export { judgeResults, llmConfig } from "./llm-judge.mjs";
 export { embedResults, embedTexts, getEmbedder, resetEmbedder } from "./embed.mjs";
 export {

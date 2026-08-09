@@ -28,7 +28,7 @@ if (typeof mock?.module !== "function") {
 async function runCliTests() {
 
 // ---------- mock 依赖(cli.mjs 的 import 链),必须在 import cli.mjs 之前 ----------
-const calls = { fetchPage: [], fetchViaBrowser: [], cachePut: [], cacheGet: 0, cfHost: 0 };
+const calls = { fetchPage: [], fetchViaBrowser: [], cachePut: [], cacheGet: 0, cfHost: 0, selection: [] };
 // 测试间共享的"当前结果",每个 test 开始前设置
 const state = { fetchPageResult: null, browserResult: null, cfHost: false, fetchPageThrows: null, cacheHit: null };
 
@@ -86,8 +86,9 @@ mock.module("../../http.mjs", {
 mock.module("../../domain-rep.mjs", {
   namedExports: {
     createDomainReputation: () => ({
+      learnSelection: (url) => calls.selection.push(url),
       learnFetch: () => {}, learnFetchBlocked: () => {},
-      learnFetchLLM: async () => {}, learnFromResultsLLM: async () => {},
+      learnFetchContent: async () => {}, learnFetchLLM: async () => {}, learnFromResultsLLM: async () => {},
       learnFromResults: async () => {}, save: async () => {},
     }),
   },
@@ -109,6 +110,7 @@ function reset() {
   calls.cachePut.length = 0;
   calls.cacheGet = 0;
   calls.cfHost = 0;
+  calls.selection.length = 0;
   state.fetchPageResult = pageOk();
   state.browserResult = null;
   state.cfHost = false;
@@ -131,6 +133,7 @@ test("① 缓存命中:不直连不兜底不重写缓存", async () => {
   assert.equal(calls.fetchPage.length, 0, "缓存命中不应直连");
   assert.equal(calls.fetchViaBrowser.length, 0, "缓存命中不应兜底");
   assert.equal(calls.cachePut.length, 0, "回放(_cached)不应重写缓存");
+  assert.deepEqual(calls.selection, [URL_], "缓存命中也应记录主动选择");
 });
 
 // ---------- ② 直连 full → 直接返回 + 写缓存 ----------

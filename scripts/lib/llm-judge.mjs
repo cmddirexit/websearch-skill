@@ -244,7 +244,7 @@ ${snippet}`;
     const s = Number(parsed.score);
     return Number.isFinite(s) ? Math.max(0, Math.min(1, s)) : null;
   } catch (e) {
-    console.error(`[llm-judge] 正文判断失败(降级为温和正反馈): ${e.message}`);
+    console.error(`[llm-judge] 正文判断失败(降级为本地正文证据): ${e.message}`);
     return null;
   }
 }

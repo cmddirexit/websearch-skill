@@ -27,6 +27,9 @@ export async function runFetch(url, maxChars) {
   url = validateFetchUrl(url);
   const t0 = Date.now();
   dbg(`fetch start: ${url} (maxChars=${maxChars})`);
+  // 主动选择本身是使用价值信号,所以缓存命中也计数;内容质量与可用性仍由后续独立通道判断。
+  rep.learnSelection(url);
+  rep.save();
   // 页面级缓存命中(6h 内):秒回,不再走 45-90s 的 CF 兜底链
   const cached = pageCacheGet(url);
   if (cached) {
@@ -40,7 +43,7 @@ export async function runFetch(url, maxChars) {
   const { fetchPage } = await import("./fetch-page.mjs"); // 懒加载:jsdom 链只在真抓正文时加载
   // 反爬/风控类失败(403/验证码/Access Restricted):内容可能很好只是被拦,中性不降分。
   // 只有"页面能开但正文空壳/拼凑"才是软文负信号;正文完整 ≠ 可信(软文页也能打开),
-  // 正反馈走 learnFetchLLM(LLM 判正文是否拼凑软文)。
+    // 正文内容反馈走 learnFetchContent(本地结构证据,可选 LLM 增强)。
   // 反爬特征检测统一走 antiblock.mjs(单一事实来源),避免正则散落漂移。
   const isAntiBot = isAntibotContent;
   const isHttpError = (msg) => /HTTP \d{3}|status \d{3}|\b404\b|\b500\b|\b502\b|\b503\b/.test(msg || "");
@@ -64,7 +67,7 @@ export async function runFetch(url, maxChars) {
     rep.save();
   };
   const feedbackFull = (r) => {
-    // 正文完整 → LLM 判断内容可信度(软文正文完整会被识破);LLM 失败保底温和正 0.6
+    // 正文完整 → 本地结构证据判断;显式启用时可由 LLM 增强。
     // 挂 llmQueue:fetch 是交互命令,进程退出前要等学习完成(否则丢失)但不超过预算
     queueFetchLearn(url, { title: r.title, desc: r.metaDesc, body: r.markdown || r.body });
   };

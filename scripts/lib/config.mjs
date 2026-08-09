@@ -239,17 +239,21 @@ export const REP_FETCH_MIN_OK_CHARS = 200;
 
 // ---- 在线跨域模式学习(历史 META_* 变量名保留兼容) ----
 /** 模式权重在线学习率(每条样本的梯度步长;随样本数递减) */
-export const META_LR = envNumber("WEBSEARCH_META_LR", 0.05);
+export const META_LR = envNumber("WEBSEARCH_META_LR", 0.5);
 /** 模式库最少样本数:少于此时冷启动预测不可靠,不启用(避免学歪的模式误判新域名) */
 export const META_MIN_SAMPLES = envNumber("WEBSEARCH_META_MIN_SAMPLES", 30);
+/** 冷启动模型必须同时见过足够的正/负独立证据,防默认环境只有失败负样本时单类投毒。 */
+export const META_MIN_CLASS_SAMPLES = 5;
 /** 冷启动预测分压缩区间(防极端;0.15/0.85 时 factor≈0.4/1.1,软降权可控) */
 export const META_COLD_CLAMP = [0.15, 0.85];
 /** 学习式 token 特征权重上限(超上限清最久未见的一半,防膨胀) */
 export const META_MAX_WEIGHTS = envNumber("WEBSEARCH_META_MAX_WEIGHTS", 6000);
-/** 强信号(fetch 实测)的固定学习率:不随样本数衰减 —— 实测反馈必须压过大量中性搜索样本 */
-export const META_STRONG_LR = envNumber("WEBSEARCH_META_STRONG_LR", 0.2);
-/** L2 收缩(正则):每次更新对激活 token 权重乘 (1-λ) 向 0 回归 —— 罕见 token 被少数样本推走后自然淡出,稳定 token 保持(无正则的在线学习在稀疏特征下必过拟合,FTRL 同理) */
-export const META_L2_DECAY = envNumber("WEBSEARCH_META_L2_DECAY", 0.001);
+/** 可回放训练事件上限。事件只保存特征、标签与 URL 哈希,不保存正文。 */
+export const META_MAX_EVENTS = 2000;
+/** FTRL-Proximal 稀疏正则参数。 */
+export const META_FTRL_BETA = 1;
+export const META_FTRL_L1 = 0.002;
+export const META_FTRL_L2 = 0.02;
 /** 显式启用 LLM 学习后,CLI 最多等待这么久;0 = 不等待后台学习。 */
 export const LLM_WAIT_MS = Math.max(0, envNumber("WEBSEARCH_LLM_WAIT_MS", 3000));
 /** 冷启动预测置信度达满所需样本数:>= 此值时压缩系数全量生效(1.0)。

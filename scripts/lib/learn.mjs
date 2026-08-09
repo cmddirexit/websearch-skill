@@ -26,7 +26,7 @@ export function queueLLMLearn(results) {
 }
 export function queueFetchLearn(url, extra) {
   llmQueue = llmQueue
-    .then(() => rep.learnFetchLLM(url, extra)) // 内部已保底(LLM 失败 → 温和正 0.6)
+    .then(() => rep.learnFetchContent(url, extra))
     .catch(() => {})
     .then(() => rep.save());
 }

@@ -11,9 +11,9 @@
 
 import {
   REP_MIN_SAMPLES, REP_STRENGTH, REP_DECAY_START_DAYS, REP_DECAY_FULL_DAYS,
-  META_LR, META_MAX_WEIGHTS, META_STRONG_LR, META_L2_DECAY,
+  META_LR, META_MAX_WEIGHTS, META_FTRL_BETA, META_FTRL_L1, META_FTRL_L2,
+  META_MIN_SAMPLES, META_MIN_CLASS_SAMPLES,
 } from "./config.mjs";
-import { GENERIC_DOMAIN_LABELS } from "./rep-features.mjs";
 
 export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -58,18 +58,52 @@ export function updateScore(entry, contribution) {
  * 每次实测都会实质性校正分数 —— 不会被大量中性搜索样本稀释。
  */
 export function updateFetchScore(entry, contribution) {
-  entry.fetchSamples = (entry.fetchSamples || 0) + 1;
-  entry.fetchScore = 0.5 * contribution + 0.5 * (entry.fetchScore ?? 0.5);
-  entry.fetchScore = clamp(entry.fetchScore, 0, 1);
-  return entry.fetchScore;
+  entry.contentSamples = (entry.contentSamples || 0) + 1;
+  entry.contentScore = 0.5 * contribution + 0.5 * (entry.contentScore ?? 0.5);
+  entry.contentScore = clamp(entry.contentScore, 0, 1);
+  return entry.contentScore;
+}
+
+/** 抓取可用性与内容质量分离。404/空壳只能更新这个分数,不得训练内容模式。 */
+export function updateAvailabilityScore(entry, available) {
+  entry.availabilitySamples = (entry.availabilitySamples || 0) + 1;
+  const contribution = available ? 0.95 : 0.1;
+  entry.availabilityScore = 0.5 * contribution + 0.5 * (entry.availabilityScore ?? 0.5);
+  return clamp(entry.availabilityScore, 0, 1);
+}
+
+/**
+ * 主动选择使用价值。它只累计正向选择次数,不表示正文可信或抓取可用,也不参与跨域模型。
+ * score 由独立样本数确定,避免重复增量公式在状态迁移或回放时产生漂移。
+ */
+export function updateUtilityScore(entry) {
+  entry.utilitySamples = (entry.utilitySamples || 0) + 1;
+  entry.utilityScore = clamp(entry.utilitySamples / 5, 0, 1);
+  return entry.utilityScore;
+}
+
+/** 至少 3 次独立选择后才微升,5 次达到上限 3%;没有负向 utility 反馈。 */
+export function utilityFactor(entry) {
+  const samples = entry?.utilitySamples || 0;
+  if (samples < REP_MIN_SAMPLES) return 1;
+  const score = Number.isFinite(entry?.utilityScore)
+    ? entry.utilityScore
+    : clamp(samples / 5, 0, 1);
+  return 1 + 0.03 * clamp(score, 0, 1);
 }
 
 /** 有效分:有 fetch 实测时实测优先(0.7/0.3 融合),无实测回退搜索推断分。
  * 软文站搜索样本多但 fetch 一次空壳 → 实测把分钉低,搜索样本拉不回来。 */
 export function effectiveScore(e) {
   const s = e.searchScore ?? 0.5;
-  if ((e.fetchSamples || 0) > 0) return 0.7 * (e.fetchScore ?? 0.5) + 0.3 * s;
+  if ((e.contentSamples || 0) > 0) return 0.7 * (e.contentScore ?? 0.5) + 0.3 * s;
   return s;
+}
+
+/** 可用性只温和影响排序,且至少需要 3 次观测。它不改变内容信誉分或 badge。 */
+export function availabilityFactor(entry) {
+  if ((entry?.availabilitySamples || 0) < REP_MIN_SAMPLES) return 1;
+  return clamp(1 + ((entry.availabilityScore ?? 0.5) - 0.5) * 0.5, 0.75, 1.05);
 }
 
 /** 时间衰减:超过 REP_DECAY_START_DAYS 未见,分数向 0.5 回归;FULL_DAYS 完全中性。纯函数。 */
@@ -102,54 +136,72 @@ export function repBadge(score, samples) {
  * token 相对中性的偏差(该 token 出现 → 质量高于/低于 0.5 多少)。
  * 纯函数,可单测。@param {Set<string>} tokens 激活 token 集
  */
+export function normalizedFeatureVector(tokens) {
+  const byChannel = new Map();
+  for (const token of tokens || []) {
+    const channel = token.slice(0, 2);
+    // 域名身份属于域名模型;filter flag 属于规则标签。两者都不得进入跨域模式。
+    if (channel !== "t:" && channel !== "u:") continue;
+    if (!byChannel.has(channel)) byChannel.set(channel, []);
+    byChannel.get(channel).push(token);
+  }
+  const vector = new Map();
+  for (const values of byChannel.values()) {
+    // Channel contribution is an average, so adding correlated title bigrams cannot by itself
+    // make the prediction more extreme.
+    const scale = 1 / values.length;
+    for (const token of values) vector.set(token, scale);
+  }
+  return vector;
+}
+
 export function predictTokens(tokens, meta) {
   let z = 0;
-  for (const t of tokens || []) z += meta?.weights?.[t] ?? 0;
+  for (const [t, x] of normalizedFeatureVector(tokens)) z += (meta?.weights?.[t] ?? 0) * x;
   return 1 / (1 + Math.exp(-z));
 }
 
+export function metaReady(meta) {
+  return (meta?.effectiveSamples || 0) >= META_MIN_SAMPLES
+    && (meta?.positiveSamples || 0) >= META_MIN_CLASS_SAMPLES
+    && (meta?.negativeSamples || 0) >= META_MIN_CLASS_SAMPLES;
+}
+
+function ftrlWeight(z, n) {
+  if (Math.abs(z) <= META_FTRL_L1) return 0;
+  return -(z - Math.sign(z) * META_FTRL_L1)
+    / ((META_FTRL_BETA + Math.sqrt(n)) / META_LR + META_FTRL_L2);
+}
+
 /**
- * 内循环:token 权重在线更新(词袋逻辑回归/感知机风格)。
- * 每条样本用实际贡献分作 label,残差 err = label − 预测,梯度下降:
- *   w_token += lr × err(仅对激活 token)
- * 学习率随样本数递减(早期快速捕捉规律,后期稳定不漂移);
- * **strong=true 时用固定大学习率 META_STRONG_LR**(fetch 实测等强信号必须
- * 压过大量中性搜索样本,不被递减 lr 稀释)。
- * 高频泛词被大量不同质量样本平均 → 权重趋近 0,自动无害;
- * 真正与低质强相关的 token 权重被反复推离 0。
+ * FTRL-Proximal 在线更新。标题和 URL 通道分别做 L1 归一化,避免长标题的相关
+ * bigram 被当成多份独立证据;confidence 控制弱标签的梯度贡献。
  * @returns {boolean} 是否有 token 被更新
  */
-export function updateMetaTokens(meta, tokens, label, { strong = false } = {}) {
-  if (!tokens || !tokens.size) return false;
+export function updateMetaTokens(meta, tokens, label, { confidence = 1 } = {}) {
+  const vector = normalizedFeatureVector(tokens);
+  if (!vector.size || !Number.isFinite(label) || confidence <= 0) return false;
   const pred = predictTokens(tokens, meta);
   const err = clamp(label - pred, -1, 1);
   meta.weightSamples = (meta.weightSamples || 0) + 1;
+  meta.effectiveSamples = (meta.effectiveSamples || 0) + clamp(confidence, 0, 1);
+  if (label >= 0.65) meta.positiveSamples = (meta.positiveSamples || 0) + confidence;
+  else if (label <= 0.35) meta.negativeSamples = (meta.negativeSamples || 0) + confidence;
   // bias 不参与预测(无特征=0.5 先验中性),权重即 token 相对中性的偏差
   meta.bias = 0;
   meta.touched = meta.touched || {};
-  meta.lastStep = meta.lastStep || {}; // token 上次被激活时的 weightSamples(惰性 L2 用)
-  meta.freq = meta.freq || {}; // token 被激活次数(per-token 学习率用)
-  for (const t of tokens) {
-    if (t.startsWith("d:")) {
-      const lab = t.slice(2);
-      if (lab === "www" || lab.length === 2 || GENERIC_DOMAIN_LABELS.has(lab)) continue; // 泛域名标签不学
-    }
-    // per-token 学习率:由该 token 自身激活次数决定,与全局样本数无关 ——
-    // 全局递减学习率后期(lr≈0.002)新出现的软文套路 token 学不动(权重永远起不来),
-    // 这是在线学习“新特征冷启动”问题的简化解(AdaGrad/FTRL per-coordinate 同源):
-    // 新 token(freq=0)回到初始学习率 0.05,快速建立模式;稳定 token(freq 大)平滑回落。
-    // strong(fetch 实测)固定大学习率,不在此列。
-    const freq = meta.freq[t] || 0;
-    const tokLr = strong ? META_STRONG_LR : META_LR / (1 + freq * 0.01);
-    meta.freq[t] = freq + 1;
-    // 惰性 L2 收缩(间隔补算,等价 weight decay,见 FTRL 惰性正则精神):
-    // 权重先按距上次激活的步数差向 0 回归再更新 —— 罕见 token 被 1-2 个偶然样本推走后,
-    // 隔大量样本再激活时证据已被冲淡(权重大幅回归);连续激活的稳定 token gap≈1,
-    // 收缩(0.1%)与推动(lr×err)平衡,保持显著。防稀疏特征过拟合。
-    const gap = meta.weightSamples - (meta.lastStep[t] ?? meta.weightSamples);
-    meta.weights[t] = (meta.weights[t] ?? 0) * Math.pow(1 - META_L2_DECAY, gap) + tokLr * err;
+  meta.z = meta.z || {};
+  meta.n = meta.n || {};
+  for (const [t, x] of vector) {
+    const oldN = meta.n[t] || 0;
+    const oldW = meta.weights[t] || 0;
+    const gradient = -err * x * clamp(confidence, 0, 1);
+    const nextN = oldN + gradient * gradient;
+    const sigma = (Math.sqrt(nextN) - Math.sqrt(oldN)) / META_LR;
+    meta.z[t] = (meta.z[t] || 0) + gradient - sigma * oldW;
+    meta.n[t] = nextN;
+    meta.weights[t] = ftrlWeight(meta.z[t], nextN);
     meta.touched[t] = Date.now();
-    meta.lastStep[t] = meta.weightSamples;
   }
   // 权重上限保护:超上限清最久未见的一半(旧 token 模式已稳定,淘汰不伤新学习)
   if (meta.weightSamples % 100 === 0) {
@@ -159,8 +211,8 @@ export function updateMetaTokens(meta, tokens, label, { strong = false } = {}) {
       for (const k of keys.slice(0, Math.floor(META_MAX_WEIGHTS / 2))) {
         delete meta.weights[k];
         delete meta.touched[k];
-        delete meta.lastStep[k];
-        delete meta.freq[k];
+        delete meta.z[k];
+        delete meta.n[k];
       }
     }
   }
