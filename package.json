@@ -1,6 +1,6 @@
 {
   "name": "websearch-skill",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "private": true,
   "description": "网络搜索与网页正文提取(bing/baidu/marginalia + Chromium 浏览器兜底 + Mozilla Readability 正文提取)",
   "type": "module",
