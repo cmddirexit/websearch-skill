@@ -13,7 +13,7 @@
  * 两条路径(输出契约一致,可无缝切换):
  *   1. 短语模式(零依赖,默认):STC 风格 —— 共享显著短语关联 + Jaccard 簇合并
  *   2. 语义模式(可选,传入 vectors):嵌入余弦 + 贪心首领聚类 —— 无共享词也能聚,
- *      跨语言/近义表达也识别;接近重复(cosine ≥ dupThreshold)自动折叠计数
+ *      跨语言/近义表达也识别;接近重复(cosine ≥ dupThreshold)折叠到 duplicateItems
  * 语义模式无 vectors 时自动回退短语模式(零回归)。
  *
  * 质量加权:结果可携带 quality[0,1](由 filter.mjs 生成),簇分数乘以
@@ -22,9 +22,9 @@
  */
 
 // ---- 语义聚类阈值(统一来自 config.mjs,调参先看那里) ----
-import { CLUSTER_SIM_THRESHOLD, CLUSTER_DUP_THRESHOLD, REPRINT_THRESHOLD, CLUSTER_NOISE_SCORE, SEM_WEIGHT, SEM_NOISE_THRESHOLD, MAX_CLUSTER_SIZE, BUCKET_SINGLETONS, MAX_BUCKET_SIZE } from "./config.mjs";
+import { CLUSTER_SIM_THRESHOLD, CLUSTER_DUP_THRESHOLD, REPRINT_THRESHOLD, CLUSTER_NOISE_SCORE, SEM_WEIGHT, SEM_NOISE_THRESHOLD, MAX_CLUSTER_SIZE, BUCKET_SINGLETONS, MAX_BUCKET_SIZE, envNumber } from "./config.mjs";
 import { buildPhrase, cnGrams, enWords, queryTokens, titleTokens } from "./cluster-phrase.mjs";
-import { buildSemantic, cosine, hasReprintTextEvidence } from "./cluster-semantic.mjs";
+import { buildSemantic, cosine, descWindowHashes, hasReprintTextEvidence } from "./cluster-semantic.mjs";
 import { cleanTitleForLabel, distinctiveSpan, readableClusterLabel } from "./cluster-labels.mjs";
 
 // ---- re-export(公共 API 不变,index.mjs 与其他复用方零改动) ----
@@ -59,7 +59,7 @@ export const DEFAULT_OPTIONS = {
   mergeThreshold: 0.55,
   // ---- 语义模式(传入 vectors 时生效)阈值来自 config.mjs,可用环境变量覆盖 ----
   // 模型适配:bge-small-zh(默认)用 0.42;multilingual-e5-small 无前缀相似度整体上移,应调 ~0.80
-  simThreshold: Number(process.env.WEBSEARCH_SIM_THRESHOLD) || CLUSTER_SIM_THRESHOLD,
+  simThreshold: envNumber("WEBSEARCH_SIM_THRESHOLD", CLUSTER_SIM_THRESHOLD),
   dupThreshold: CLUSTER_DUP_THRESHOLD,
   // 转载级折叠候选门槛(0.75~dupThreshold 区间需文本证据,见 clusterResults 预处理)
   reprintThreshold: REPRINT_THRESHOLD,
@@ -85,7 +85,7 @@ export const DEFAULT_OPTIONS = {
  *   - vectors: 可选语义模式。与 results 等长的嵌入向量数组(embed.mjs 生成);
  *     缺失/长度不符 → 自动回退短语模式
  * @returns {{clusters:Array<{label:string, score:number, size:number, quality:number,
- *            lowRelevance:boolean, duplicates:number, items:Array, variants:string[]}>,
+ *            lowRelevance:boolean, duplicates:number, duplicateItems:Array, items:Array, variants:string[]}>,
  *            uncovered:Array, phrases:Array<{phrase:string, df:number}>}}
  */
 export function clusterResults(results, query, options = {}) {
@@ -106,6 +106,8 @@ export function clusterResults(results, query, options = {}) {
     text: `${r.title || ""} ${r.desc || ""}`,
     tokens: new Set(titleTokens(r.title || "", opts.stopWords)),
     quality: typeof r.quality === "number" ? r.quality : 1,
+    // 99 条语义转载比较会访问同一摘要多次,固定窗口哈希只预计算一次。
+    descFingerprint: semanticOk ? descWindowHashes(r.desc) : null,
   }));
 
   // 2. 文档频率(短语模式建簇 + 标签/变体标注共用;语义模式标签仍用短语,保证可读)
@@ -127,8 +129,14 @@ export function clusterResults(results, query, options = {}) {
         if (docs[j].dup) continue;
         const sim = cosine(docs[i].vec, docs[j].vec);
         if (sim < opts.reprintThreshold || sim >= opts.dupThreshold) continue;
-        if (hasReprintTextEvidence(docs[i].result, docs[j].result)) {
+        if (hasReprintTextEvidence(
+          docs[i].result,
+          docs[j].result,
+          docs[i].descFingerprint,
+          docs[j].descFingerprint,
+        )) {
           docs[j].dup = true; // 后出现者折叠(主引擎/靠前结果优先保留)
+          docs[j].duplicateOf = docs[i].idx;
         }
       }
     }
@@ -170,9 +178,18 @@ export function clusterResults(results, query, options = {}) {
       }
       // 封顶 1:别名 token 命中可致 total>baseW(修复:旧实现输出"相关度 1.20")
       const textScore = baseW > 0 ? Math.min(1, total / baseW) : 0;
-      // 排名信号:簇内结果平均原始排名(数组顺序即引擎排序,rank=idx+1),归一化到 [0,1]
-      const avgRank = items.reduce((s, d) => s + d.idx + 1, 0) / items.length;
-      const rankScore = results.length > 1 ? 1 - (avgRank - 1) / (results.length - 1) : 1;
+      // 排名信号:聚合结果优先使用各来源内部名次,避免“第二引擎第 1 名=全局第 11 名”
+      // 的来源偏置;直连/库调用没有 sourceRank 时保持原数组位置归一化。
+      const itemRankScore = (d) => {
+        const r = d.result;
+        if (Number.isFinite(r.sourceRank) && r.sourceRank >= 1 && Number.isFinite(r.sourceCount)) {
+          return r.sourceCount > 1
+            ? 1 - (r.sourceRank - 1) / (r.sourceCount - 1)
+            : 1;
+        }
+        return results.length > 1 ? 1 - d.idx / (results.length - 1) : 1;
+      };
+      const rankScore = items.reduce((sum, d) => sum + itemRankScore(d), 0) / items.length;
       // 质量加权:簇分数 × (0.5 + 0.5×簇内平均质量)。纯主题簇质量≈1 无影响;
       // 广告/垃圾聚集的簇质量低 → 分数被压沉(不剔除但排后 + lowRelevance)
       const meanQ = items.reduce((s, d) => s + d.quality, 0) / items.length;
@@ -213,6 +230,7 @@ export function clusterResults(results, query, options = {}) {
         quality: meanQ,
         lowRelevance,
         duplicates: c.dups || 0,
+        duplicateMembers: c.duplicateMembers || [],
         items,
         variants,
         semScore,
@@ -237,6 +255,11 @@ export function clusterResults(results, query, options = {}) {
         quality: c.quality,
         lowRelevance: c.lowRelevance,
         duplicates: c.duplicates,
+        // 折叠项不在主 items 重复展示,但 URL 与代表关系必须可恢复。
+        duplicateItems: c.duplicateMembers.map((d) => ({
+          ...d.result,
+          duplicateOf: results[d.duplicateOf]?.url || null,
+        })),
         items: items.map((d) => ({
           ...d.result,
           // 每条结果的 ML 语义相关度(0~1);无语义重排时为 undefined(不输出)

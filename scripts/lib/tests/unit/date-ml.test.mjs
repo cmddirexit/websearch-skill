@@ -6,6 +6,7 @@ import {
   extractPageFeatures,
   pickDate,
   predictLinear,
+  recordFetchOutcome,
   updateLinear,
   resetDateModel,
   inspectDateModel,
@@ -101,6 +102,31 @@ test("在线学习: updateLinear 朝 label 方向收敛,预测值改善", () => 
   const p1 = predictLinear(feats, model);
   assert.ok(p1 > p0, `正样本训练后预测应上升: ${p0.toFixed(3)} → ${p1.toFixed(3)}`);
   assert.ok(p1 > 0.5, "应超过 0.5 阈值");
+});
+
+test("在线学习: 正常文章正文按字符长度提供列表页负样本", () => {
+  resetDateModel();
+  const html = `<html><body><article><p>${"正文内容".repeat(100)}</p></article></body></html>`;
+  recordFetchOutcome("https://example.com/article", html, {
+    isList: false,
+    listCount: 0,
+    body: "正文内容".repeat(100),
+  });
+  assert.equal(inspectDateModel().list.samples, 1, "未显式传 bodyLen 时应使用正文字符数");
+});
+
+test("在线学习: 正文明确日期同时强化正确候选并压低错误候选", () => {
+  resetDateModel();
+  const html = `<html><head><meta property="article:published_time" content="2025-05-01"></head>
+    <body><article><p>本文发表于2026年8月6日。</p><p>${"正文".repeat(150)}</p></article></body></html>`;
+  recordFetchOutcome("https://example.com/2026/08-07/a.html", html, {
+    body: "正文".repeat(150),
+    listCount: 0,
+  });
+  const model = inspectDateModel().cand;
+  assert.ok(model.samples >= 3, `meta/URL/正文候选都应收到监督,实际 ${model.samples}`);
+  assert.ok(model.w["src:body-ctx"] > 0.25, "正文强日期来源权重应得到正向更新");
+  assert.ok(model.w["src:meta-article"] < 0.7, "冲突 meta 来源权重应得到负向更新");
 });
 
 test("模型持久化: inspectDateModel 含冷启动先验(meta-article 权重最高)", () => {

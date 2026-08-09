@@ -190,11 +190,7 @@ export async function main(args) {
     if (engine === "cnnews" && !query) console.error("[cnnews] 空查询 → 最新要闻(热点模式)");
     if (!ENGINES[engine]) throw new Error(`未知引擎: ${engine}(可选 ${Object.keys(ENGINES).join("|")})`);
     await runSearch(query, engine, limit, flat, semantic, since);
-    // 搜索路径的 LLM 学习加硬超时(20s):结果已打印完,网络差时 58 条×3 片并行判断可拖到
-    // 30s 上限,外部调用(agent bash 工具 120s 总超时)会被截断 —— 学习是后台增强,超时放弃
-    // 下次搜索缓存未命中会重判,不阻塞主流程。fetch 路径单条学习快,保持不限时(下同)。
-    await waitLLM(20000);
-    console.error('[dbg] search 完成 @', Date.now() % 100000); // 统一等一次 LLM 学习落盘(降级链多轮 printResults 的排队在预算内合并等,不逐轮等)
+    await waitLLM();
   } else if (cmd === "reveal") {
     // 展开查看上次搜索的折叠区详情(缓存文件由 search 生成;agent 也可直接读 REVEAL_FILE)
     const fs = await import("node:fs");
@@ -208,7 +204,7 @@ export async function main(args) {
     const max = maxIdx >= 0 ? Math.min(Math.max(parseInt(rest[maxIdx + 1]) || 3000, 500), 20000) : 3000;
     if (!url) throw new Error('缺少 URL,用法: websearch.mjs fetch "https://..."');
     await runFetch(url, max);
-    await waitLLM(); // fetch 的 LLM 学习也要落盘(预算内)才退出进程
+    await waitLLM();
   } else if (cmd === "timeline") {
     // 时间线:复杂事件(美伊冲突等)分散在多篇报道里(4-8 月),单篇 fetch 看不清脉络。
     // timeline 聚合搜索 → 并行抓取关键文章 → 提取发布时间+要点 → 按时间排序输出。
@@ -219,7 +215,7 @@ export async function main(args) {
     const limitIdx = rest.indexOf("--limit");
     const limit = limitIdx >= 0 ? Math.min(Math.max(parseInt(rest[limitIdx + 1]) || 8, 3), 12) : 8;
     await runTimeline(query, limit);
-    await waitLLM(); // 抓取路径的 LLM 学习落盘才退出(与 fetch 一致)
+    await waitLLM();
   } else if (cmd === "hotlist") {
     // 懒加载 hotlist(其内部 import jsdom):纯 search/fetch 路径不加载 jsdom,与 fetch-page 懒加载设计一致
     const { fetchHotlist } = await import("./engines/hotlist.mjs");

@@ -1,7 +1,7 @@
 // domain-rep.mjs 域名信誉评分 + 增量学习(软限制,非硬剔除)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -153,14 +153,12 @@ test("rep: fetch 实测反馈 — 最强信号,空壳域名快速降分", () => 
 });
 
 
-test("rep: 低相关折叠负反馈(轻信号,不冤枉内容站)", () => {
+test("rep: 查询低相关折叠不写入全局域名信誉", () => {
   const rep = createDomainReputation({ file: null });
   rep.learnCollapsed([
     { items: [{ url: "https://dict-site.com/a" }, { url: "https://dict-site.com/b" }] },
   ]);
-  const lu = rep.lookup("https://dict-site.com/c");
-  assert.ok(lu && lu.samples === 2 && lu.score < 0.5, "折叠轻负信号:" + lu?.score);
-  assert.ok(lu.score > 0.3, "折叠是轻信号,不比 fetch 空壳(0.1)重");
+  assert.equal(rep.lookup("https://dict-site.com/c"), null, "本次查询不相关不代表域名低质量");
 });
 
 
@@ -202,6 +200,27 @@ test("rep: 持久化 roundtrip(跨进程增量积累)", () => {
     r2.save();
     const r3 = createDomainReputation({ file });
     assert.equal(r3._raw()["persist.com"].searchSamples, 3, "增量积累");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rep: v2 污染模型不迁移到新的证据边界", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsrep-v2-"));
+  const file = join(dir, "rep.json");
+  try {
+    writeFileSync(file, JSON.stringify({
+      version: 2,
+      updatedAt: Date.now(),
+      meta: { weights: { "t:词典": -3 }, weightSamples: 100 },
+      domains: { "dict.example": { searchScore: 0.1, searchSamples: 20 } },
+    }));
+    const rep = createDomainReputation({ file });
+    assert.equal(rep.lookup("https://dict.example/a"), null, "旧查询反馈污染不得继续影响信誉");
+    assert.equal(rep._meta().weightSamples, 0, "旧规则自训练权重不得继续用于冷启动");
+    rep.learnFromResults([{ title: "正常词典", url: "https://dict.example/a", quality: 1, flags: [] }]);
+    rep.save();
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).version, 3, "新证据写回 v3 schema");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -275,9 +294,15 @@ test("meta: 冷启动外循环 — 模式成熟后新域名无需自身样本即
   // 模式未成熟(样本 < META_MIN_SAMPLES):新域名无预测(冷启动关闭)
   rep.learnFromResults([{ title: "测试", url: "https://a.com/1", desc: "x", flags: [], quality: 0.9 }]);
   assert.equal(rep.lookup("https://brand-new-domain.com/p/1"), null, "模式未成熟不预测");
-  // 积累 60 个低质软文样本(让模式学出规律)
+  // 积累 60 个有独立可信度标签的低质软文样本(让模式学出规律)
   for (let i = 0; i < 60; i++) {
-    rep.learnFromResults([{ title: `2026年${i}月平台推荐榜测评口碑`, url: `https://seo${i}.com/2026/0${i % 9}/t${i}${i}.shtml`, desc: "", flags: ["low:spam-desc", "low:desc-empty"], quality: 0.4 }]);
+    const url = `https://seo${i}.com/2026/0${i % 9}/t${i}${i}.shtml`;
+    const title = `2026年${i}月平台推荐榜测评口碑`;
+    rep.record(url, 0.4, {
+      low: true,
+      tokens: extractLearnFeatures(url, { title, flags: ["low:spam-desc", "low:desc-empty"] }),
+      metaLabel: 0.1,
+    });
   }
   // 全新域名(从未见过):标题带学到的软文模式 → 冷启动预测低分 + 软降权生效
   const cold = rep.lookup("https://brand-new-seo-site.cn/2026/07/t20260712_12345.shtml", { title: "2026年7月信息平台推荐榜测评" });
@@ -305,11 +330,11 @@ test("meta: 公众号等引擎跳转链接只学标题不学 URL token(域名无
   assert.ok(full.has("d:sogou") && full.has("u:link"), "完整提取含 URL token");
   assert.ok(![...only].some((t) => t.startsWith("d:") || t.startsWith("u:")), "仅标题提取无 URL token");
   assert.ok(only.has("t:推荐"), "标题 bigram 保留");
-  // learnFromResults 对引擎跳转结果:域名级不建条目,但标题参与模式学习
+  // 本地规则标签不再训练跨域模型;引擎跳转结果也不应污染 token 权重
   const rep = createDomainReputation({ file: null });
   rep.learnFromResults([{ title: "某公众号深度文章推荐", url, desc: "", flags: [], quality: 1 }]);
   assert.equal(rep._raw()["weixin.sogou.com"], undefined, "引擎域不建域名条目");
-  assert.ok(rep._meta().weightSamples >= 1, "标题 token 仍参与模式学习");
+  assert.equal(rep._meta().weightSamples, 0, "无独立标签时不训练跨域模式");
 });
 
 
@@ -325,6 +350,7 @@ test("meta: LLM label 学习 — learnFromResultsLLM 用内容可信度而非 qu
   const ok = await rep.learnFromResultsLLM([{ title: "测试", url: "https://a.com/1", desc: "x", flags: [], quality: 0.9 }]);
   assert.equal(ok, false, "LLM 关闭时降级,返回 false");
   assert.ok(rep._raw()["a.com"], "降级后域名级学习照常");
+  assert.equal(rep._meta().weightSamples, 0, "规则 quality 降级不得反训跨域 token 模型");
   delete process.env.WEBSEARCH_LLM_OFF;
 });
 

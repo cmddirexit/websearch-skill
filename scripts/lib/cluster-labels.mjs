@@ -63,6 +63,36 @@ export function longestCommonSpan(a, b) {
   return a.slice(end - best, end);
 }
 
+/** 标签候选覆盖判断。英文标题大小写经常不一致(OpenAI/openai),覆盖率应忽略大小写；
+ * 纯英文字母候选还必须落在单词边界上,避免跨大小写标题的 LCS 退化成 "pen" 这类词内碎片。 */
+function containsLabelCandidate(title, candidate) {
+  const haystack = String(title || "").toLowerCase();
+  const needle = String(candidate || "").toLowerCase();
+  if (!needle) return false;
+  if (!/^[a-z]+$/.test(needle)) return haystack.includes(needle);
+  let from = 0;
+  while (from <= haystack.length - needle.length) {
+    const at = haystack.indexOf(needle, from);
+    if (at < 0) return false;
+    const before = at > 0 ? haystack[at - 1] : "";
+    const after = at + needle.length < haystack.length ? haystack[at + needle.length] : "";
+    if (!/[a-z]/.test(before) && !/[a-z]/.test(after)) return true;
+    from = at + 1;
+  }
+  return false;
+}
+
+/** 回退 token 统一为小写,展示时尽量恢复首个标题里的原始大小写。 */
+function restoreTitleCasing(value, titles) {
+  if (!value || !/[a-z]/i.test(value)) return value;
+  const needle = value.toLowerCase();
+  for (const title of titles) {
+    const at = title.toLowerCase().indexOf(needle);
+    if (at >= 0) return title.slice(at, at + value.length);
+  }
+  return value;
+}
+
 /**
  * 可读簇标签:簇内标题两两最长公共子串中得分最高者。
  * 得分 = 长度 + 覆盖标题数 + 含 df 最高 token 加成 —— 兼顾"长而完整"与"代表全簇";
@@ -91,7 +121,9 @@ export function readableClusterLabel(titles, df, clusterToks, { maxLen = 18, min
         : [raw];
       for (const s of pieces) {
         if (s.length < minLen || !/[A-Za-z\u4e00-\u9fff]/.test(s)) continue;
-        const cov = clean.reduce((n, t) => n + (t.includes(s) ? 1 : 0), 0);
+        const cov = clean.reduce((n, t) => n + (containsLabelCandidate(t, s) ? 1 : 0), 0);
+        // 候选来自一对标题,按独立标签边界计算后却覆盖不足两条,说明它只是词内碎片。
+        if (cov < 2) continue;
         const old = cands.get(s);
         if (!old || cov > old.cov) cands.set(s, { s, cov });
       }
@@ -108,7 +140,7 @@ export function readableClusterLabel(titles, df, clusterToks, { maxLen = 18, min
       score: c.s.length + c.cov + (topStr && c.s.toLowerCase().includes(topStr.toLowerCase()) ? 1.5 : 0),
     }))
     .sort((a, b) => b.score - a.score || b.s.length - a.s.length);
-  const best = scored[0]?.s || topStr;
+  const best = scored[0]?.s || restoreTitleCasing(topStr, clean);
   return best.length > maxLen ? best.slice(0, maxLen) : best;
 }
 

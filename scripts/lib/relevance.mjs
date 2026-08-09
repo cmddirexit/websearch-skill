@@ -154,6 +154,11 @@ export function collapsedMarkdown(collapsed, query, opts = {}) {
       lines.push(`- ${x.title || ""}`);
       if (x.url) lines.push(`  ${x.url}`);
     }
+    for (const x of c.duplicateItems || []) {
+      lines.push(`- [近似重复] ${x.title || ""}`);
+      if (x.url) lines.push(`  ${x.url}`);
+      if (x.duplicateOf) lines.push(`  代表: ${x.duplicateOf}`);
+    }
     lines.push("");
   }
   return lines.join("\n");

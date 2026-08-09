@@ -5,6 +5,14 @@
  * 命名前缀标注用途: HTTP_ / CLI_ / MARGINALIA_ / BAIDU_ / BODY_
  */
 
+/** 读取数值环境变量。显式的 0 必须保留,非法值才回退默认值。 */
+export function envNumber(name, fallback, env = process.env) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 // ---- HTTP ----
 /** 桌面 Chrome UA(httpGet 与浏览器兜底共用,反爬伪装) */
 /**
@@ -40,7 +48,9 @@ export const DOMAIN_RATE_LIMIT_MS = 1500;
 
 // ---- Cookie jar(会话持久化) ----
 /** 技能缓存目录(折叠详情/会话 Cookie 等;统一改这里即可换缓存位置) */
-export const CACHE_DIR = `${process.env.HOME || process.env.TMPDIR || "/tmp"}/.cache`;
+const TEST_CACHE_DIR = `${process.env.TMPDIR || "/tmp"}/websearch-test-${process.pid}`;
+export const CACHE_DIR = process.env.WEBSEARCH_CACHE_DIR ||
+  (process.env.NODE_TEST_CONTEXT ? TEST_CACHE_DIR : `${process.env.HOME || process.env.TMPDIR || "/tmp"}/.cache`);
 /** Cookie 持久化文件(跨 CLI 运行共享,模拟"老访客"降低风控判定) */
 export const COOKIE_FILE = `${CACHE_DIR}/websearch-cookies.json`;
 /** 引擎失败记忆持久化文件(跨 CLI 运行:失败的引擎进入冷却期,后续搜索直接跳过,
@@ -149,17 +159,17 @@ export const CLUSTER_DUP_THRESHOLD = 0.94;
 /** 转载级折叠候选门槛(实测):转载同文 ~0.95、转载换措辞 ~0.78~0.85、
  * 同主题不同文 <0.72~0.80。0.75 以下必不折叠;0.75~dupThreshold 区间需文本
  * 证据(标题/摘要 LCS 近重复)才折叠,防同主题不同文误杀(见 cluster.mjs 预处理)。 */
-export const REPRINT_THRESHOLD = Number(process.env.WEBSEARCH_REPRINT_THRESHOLD) || 0.75;
+export const REPRINT_THRESHOLD = envNumber("WEBSEARCH_REPRINT_THRESHOLD", 0.75);
 /** 超大簇拆分:语义模式下簇内成员数超过此值 → 动态拆分检查
  * (拆分信号数据驱动:pairwise 归属度 IQR 离群检测 + 当前结果集词频子主题分组,
  * 无固定阈值;见 cluster.mjs splitBySignals) */
-export const MAX_CLUSTER_SIZE = Number(process.env.WEBSEARCH_MAX_CLUSTER_SIZE) || 12;
+export const MAX_CLUSTER_SIZE = envNumber("WEBSEARCH_MAX_CLUSTER_SIZE", 12);
 
-/** 单例语义桶合并:拆分后剩余的单例(未归桶)按 pairwise 平均链接(UPGMA)合并成桶,
- * 截止数据驱动(pairwise Q3 + 最大 gap),无固定阈值。env=0 关闭。 */
+/** 单例语义桶合并:拆分后剩余的单例按平均链接(UPGMA)合并成桶,
+ * 截止=max(当前后端 simThreshold,pairwise Q3)+最大 gap。env=0 关闭。 */
 export const BUCKET_SINGLETONS = process.env.WEBSEARCH_BUCKET_SINGLETONS !== "0";
 /** 桶规模上限:超限禁止该对合并(防一桶吞下所有单例) */
-export const MAX_BUCKET_SIZE = Number(process.env.WEBSEARCH_MAX_BUCKET_SIZE) || 6;
+export const MAX_BUCKET_SIZE = envNumber("WEBSEARCH_MAX_BUCKET_SIZE", 6);
 
 // ---- 语义嵌入 API 后端(OpenAI 兼容,如硅基流动) ----
 /** API 基址(硅基流动;可换其它 OpenAI 兼容提供商) */
@@ -170,7 +180,7 @@ export const EMBED_API_MODEL = process.env.SILICONFLOW_EMBED_MODEL || "Qwen/Qwen
  * (报道↔指南 0.903↔0.906),分布不变 → 聚类阈值无需调整;存储/计算省 4 倍
  * (UPGMA pairwise 等 O(n²)×dim 热点)。0 = 不压缩(4096 全维);
  * 不支持的提供商(400/422)自动去掉该参数重试。 */
-export const EMBED_API_DIMENSIONS = Number(process.env.EMBED_API_DIMENSIONS) || 1024;
+export const EMBED_API_DIMENSIONS = envNumber("EMBED_API_DIMENSIONS", 1024);
 /** API 后端聚类相似度阈值(实测 Qwen3-8B:同主题 0.58~0.72 vs 异主题 0.32~0.45,0.5 安全分离) */
 export const EMBED_API_SIM_THRESHOLD = 0.5;
 /** 簇相关度低于此 → 标记 lowRelevance(广告/垃圾簇沉底提示) */
@@ -178,9 +188,9 @@ export const CLUSTER_NOISE_SCORE = 0.3;
 
 // ---- 语义相关性重排(query↔文档余弦,ML 温和过滤;不可用自动回退 text+rank) ----
 /** 语义相关性在簇分数中的权重(有 queryVec 时,text/rank 权重按比例收缩,保持三者之和为 1) */
-export const SEM_WEIGHT = Number(process.env.WEBSEARCH_SEM_WEIGHT) || 0.45;
+export const SEM_WEIGHT = envNumber("WEBSEARCH_SEM_WEIGHT", 0.45);
 /** 语义模式下,簇内 query↔文档平均余弦低于此 → 额外标记 lowRelevance(仍展示,不剔除) */
-export const SEM_NOISE_THRESHOLD = Number(process.env.WEBSEARCH_SEM_NOISE) || 0.32;
+export const SEM_NOISE_THRESHOLD = envNumber("WEBSEARCH_SEM_NOISE", 0.32);
 
 // ---- 语义相关性分级(展示策略层,relevance.mjs 消费;不删 URL,分级给摘要) ----
 // 三档:相关(完整展示) / 边缘(标题+URL,不给摘要) / 无关(沉底折叠区,只留 URL+原因)
@@ -205,7 +215,7 @@ export const REP_FILE = `${CACHE_DIR}/websearch-domain-rep.json`;
 /** 冷启动:样本数低于此不干预(避免少量样本误伤,学习期先观察) */
 export const REP_MIN_SAMPLES = 3;
 /** 信誉分 → quality 乘性因子映射斜率:score 0.5→1.0,0→0.35,1→1.15(clamp 后) */
-export const REP_STRENGTH = Number(process.env.WEBSEARCH_REP_STRENGTH) || 1.6;
+export const REP_STRENGTH = envNumber("WEBSEARCH_REP_STRENGTH", 1.6);
 /** 超过此天数未见的域名开始向中性 0.5 回归(站点改版/换人运营的宽容期) */
 export const REP_DECAY_START_DAYS = 30;
 /** 超过此天数未见 → 完全中性(0.5,零影响) */
@@ -219,19 +229,21 @@ export const REP_FETCH_EMPTY_CONTRIB = 0.1;
 /** fetch 正文达到此字符数才算成功(防“页面能开但正文为空”的软文壳) */
 export const REP_FETCH_MIN_OK_CHARS = 200;
 
-// ---- 元学习(双循环:模式权重在线学习 + 新域名冷启动匹配) ----
+// ---- 在线跨域模式学习(历史 META_* 变量名保留兼容) ----
 /** 模式权重在线学习率(每条样本的梯度步长;随样本数递减) */
-export const META_LR = Number(process.env.WEBSEARCH_META_LR) || 0.05;
+export const META_LR = envNumber("WEBSEARCH_META_LR", 0.05);
 /** 模式库最少样本数:少于此时冷启动预测不可靠,不启用(避免学歪的模式误判新域名) */
-export const META_MIN_SAMPLES = Number(process.env.WEBSEARCH_META_MIN_SAMPLES) || 30;
+export const META_MIN_SAMPLES = envNumber("WEBSEARCH_META_MIN_SAMPLES", 30);
 /** 冷启动预测分压缩区间(防极端;0.15/0.85 时 factor≈0.4/1.1,软降权可控) */
 export const META_COLD_CLAMP = [0.15, 0.85];
 /** 学习式 token 特征权重上限(超上限清最久未见的一半,防膨胀) */
-export const META_MAX_WEIGHTS = Number(process.env.WEBSEARCH_META_MAX_WEIGHTS) || 6000;
+export const META_MAX_WEIGHTS = envNumber("WEBSEARCH_META_MAX_WEIGHTS", 6000);
 /** 强信号(fetch 实测)的固定学习率:不随样本数衰减 —— 实测反馈必须压过大量中性搜索样本 */
-export const META_STRONG_LR = Number(process.env.WEBSEARCH_META_STRONG_LR) || 0.2;
+export const META_STRONG_LR = envNumber("WEBSEARCH_META_STRONG_LR", 0.2);
 /** L2 收缩(正则):每次更新对激活 token 权重乘 (1-λ) 向 0 回归 —— 罕见 token 被少数样本推走后自然淡出,稳定 token 保持(无正则的在线学习在稀疏特征下必过拟合,FTRL 同理) */
-export const META_L2_DECAY = Number(process.env.WEBSEARCH_META_L2_DECAY) || 0.001;
+export const META_L2_DECAY = envNumber("WEBSEARCH_META_L2_DECAY", 0.001);
+/** 显式启用 LLM 学习后,CLI 最多等待这么久;0 = 不等待后台学习。 */
+export const LLM_WAIT_MS = Math.max(0, envNumber("WEBSEARCH_LLM_WAIT_MS", 3000));
 /** 冷启动预测置信度达满所需样本数:>= 此值时压缩系数全量生效(1.0)。
  * Bayesian smoothing 精神:模式越成熟预测越敢偏离中性,刚过门槛时保守压缩。 */
 export const META_TRUST_FULL_SAMPLES = 3000;

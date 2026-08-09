@@ -1,27 +1,27 @@
 /**
- * domain-rep.mjs — 域名信誉评分 + 双循环元学习(软限制,非硬剔除)
+ * domain-rep.mjs — 域名信誉评分 + 在线跨域模式学习(软限制,非硬剔除)
  *
  * 动机:中文搜索结果的软文污染是动态演化的(SEO 站群换域名/换路径/换模板),
  * 静态黑名单或 site: 限定治标不治本。逐域名独立评分在新域名面前是盲区
- * (每个新域名都要从零积累样本才被识别)—— 故在域名级学习之上叠加**元学习**:
+ * (每个新域名都要从零积累样本才被识别)—— 故在域名级学习之上叠加在线模式模型。
+ * 历史 API/文档称其为“元学习”,算法本质是带持久化的在线逻辑回归,不是 MAML 类
+ * learning-to-learn。跨域模型只接受独立质量证据,规则自身生成的标签不得反训规则特征。
  *
  * ┌─────────────────────── 双循环结构 ───────────────────────┐
  * │ 内循环(模式学习):已知域名积累的样本(特征 + 实际质量贡献)  │
  * │   → 在线更新模式权重(特征→垃圾概率),类似感知机/逻辑回归    │
  * │ 外循环(冷启动匹配):新域名首次出现(无自身样本)             │
  * │   → 提取特征 → 用模式权重预测初始信誉分,立即软降权/加权    │
- * │ 反馈闭环:新域名每次出现的新数据同时更新                    │
- * │   ① 该域名自身信誉分(域名级学习)                          │
- * │   ② 模式权重(元学习,模式持续演化)                        │
+ * │ 反馈闭环:每次结果更新域名自身;有独立质量标签时才更新       │
+ * │   跨域模式权重,避免规则标签反训规则特征                    │
  * └───────────────────────────────────────────────────────────┘
  *
  * 三级信号(弱→强):
  *   - 规则质量分 quality + 低质标记(filter.mjs,推断)
- *   - 低相关折叠(该域结果与查询无关,聚类后负反馈)
  *   - fetch 实测正文质量(空壳/404 → 0.1;有实质正文 → 0.95)
  *
  * 域名级学习:searchScore(递减学习率)+ fetchScore(实测优先融合,0.7/0.3)。
- * 元学习:学习式 token 特征(标题 bigram/英文词 + URL 段 + 内容标记,无人工词表)
+ * 在线模式学习:token 特征(标题 bigram/英文词 + URL 段 + 内容标记,无人工词表)
  *   → updateMetaTokens 在线更新 token 权重 —— 哪些 token 预示低质由数据决定,非硬匹配。
  * 衰减:30 天未见的域名向中性 0.5 回归,90 天完全中性(不永久定罪)。
  * 应用:信誉分映射为 quality 的乘性因子(软降权)—— 低信誉压沉不剔除,高信誉微升。
@@ -40,6 +40,10 @@ import { judgeResults, judgeText, judgeCacheGet } from "./llm-judge.mjs";
 // 实例内部使用的纯函数(显式 import,re-export 不创建当前作用域绑定)
 import { clamp, CONTENT_LOW_FLAGS, contributionFromQuality, updateScore, updateFetchScore, effectiveScore, decayedScore, repFactor, repBadge, predictTokens, updateMetaTokens } from "./rep-score.mjs";
 import { FUNCTIONAL_PATH_RE, registrableHost, repKeys, extractLearnFeatures, titleFlagTokens, urlTokens, GENERIC_DOMAIN_LABELS } from "./rep-features.mjs";
+
+// v3 切断了查询相关性负反馈和规则标签→规则特征的目标泄漏。旧模型无法逐样本
+// 反演出污染来源,因此按缓存 schema 失效并从中性重新学习。
+const REP_SCHEMA_VERSION = 3;
 
 // ---- re-export(公共 API 不变:index.mjs / domain-rep.test.mjs / backtest-meta.mjs 零改动) ----
 export { clamp, CONTENT_LOW_FLAGS, contributionFromQuality, updateScore, updateFetchScore, effectiveScore, decayedScore, repFactor, repBadge, predictTokens, updateMetaTokens } from "./rep-score.mjs";
@@ -60,6 +64,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
     try {
       if (!file || !existsSync(file)) return;
       const j = JSON.parse(readFileSync(file, "utf8"));
+      if (j.version !== REP_SCHEMA_VERSION) return;
       domains = j.domains || {};
       meta = { bias: 0, weights: {}, touched: {}, lastStep: {}, freq: {}, weightSamples: 0, ...(j.meta || {}) };
       // token 权重时间衰减:模式记着过时的软文词会永久压制新内容(站点/站群会换模板),
@@ -101,7 +106,7 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
         for (const [k] of entries.slice(0, Math.floor(REP_MAX_DOMAINS / 2))) delete domains[k];
       }
       mkdirSync(file.replace(/\/[^/]+$/, ""), { recursive: true });
-      writeFileSync(file, JSON.stringify({ version: 2, updatedAt: Date.now(), meta, domains }));
+      writeFileSync(file, JSON.stringify({ version: REP_SCHEMA_VERSION, updatedAt: Date.now(), meta, domains }));
     } catch {
       /* 写失败不影响主流程 */
     }
@@ -115,16 +120,16 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
   }
 
   /**
-   * 记录一个样本(域名级 + 元学习双更新)。
-   * 内循环:元学习 label = metaLabel(提供时)或 contribution —— LLM 内容可信度判断
+   * 记录一个样本。域名级始终更新;learnMeta=true 时才更新跨域模式。
+   * 模式 label = metaLabel(提供时)或 contribution —— LLM 内容可信度判断
    *   是可靠信号(quality 分只是形态分,学出来是主题偏置),见 learnFromResultsLLM;
    *   strong=true 用固定大学习率(fetch 实测强信号,压过中性搜索样本);
    * 域名级:searchScore 用绝对 contribution 递减学习;重复低质模式惩罚(样本≥5 且低质率>0.6 → ×0.6)。
    * @param {Set<string>} tokens 激活 token 集
-   * @param {number} metaLabel 元学习专用 label(可选;缺省=contribution)
+   * @param {number} metaLabel 跨域模式专用 label(可选;缺省=contribution)
    */
-  function record(url, contribution, { low = false, tokens = null, strong = false, metaLabel = null } = {}) {
-    updateMetaTokens(meta, tokens || urlTokens(url), metaLabel ?? contribution, { strong });
+  function record(url, contribution, { low = false, tokens = null, strong = false, metaLabel = null, learnMeta = true } = {}) {
+    if (learnMeta) updateMetaTokens(meta, tokens || urlTokens(url), metaLabel ?? contribution, { strong });
     for (const key of repKeys(url)) {
       const e = getEntry(key);
       let c = contribution;
@@ -153,7 +158,9 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
     }
     const scores = needLLM.length ? await judgeResults(needLLM) : null;
     const scoreMap = new Map();
-    if (scores) needLLM.forEach((r, i) => { if (i < scores.length) scoreMap.set(r.url, scores[i]); });
+    if (scores) needLLM.forEach((r, i) => {
+      if (i < scores.length && (!scores.judged || scores.judged[i])) scoreMap.set(r.url, scores[i]);
+    });
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
       const url = r?.url;
@@ -166,10 +173,17 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
         : titleFlagTokens(r.title, flags);
       // 新域名有 LLM 判断用可信度;已知域名/LLM 失败 → quality(便宜,不重复调 LLM)
       const llmScore = scoreMap.get(url);
-      const metaLabel = llmScore !== undefined
+      const contribution = llmScore !== undefined
         ? 0.05 + 0.9 * (1 - llmScore) // 软文 1.0 → 0.05(负),可信 0.0 → 0.95(正)
         : contributionFromQuality(r.quality ?? 0.5, flags);
-      record(url, metaLabel, { low: contentLow, tokens, metaLabel });
+      // quality/flags 同时也是 tokens 的输入特征,用其派生标签训练跨域模型会发生
+      // 目标泄漏。没有独立 LLM 判断时只更新域名自身,不更新 token 权重。
+      record(url, contribution, {
+        low: contentLow,
+        tokens,
+        metaLabel: llmScore !== undefined ? contribution : null,
+        learnMeta: llmScore !== undefined,
+      });
     }
     return scoreMap.size > 0; // 是否用了 LLM label
   }
@@ -191,21 +205,21 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
       const tokens = registrableHost(url)
         ? extractLearnFeatures(url, { title: r.title, desc: r.desc, flags })
         : titleFlagTokens(r.title, flags);
-      record(url, contributionFromQuality(r.quality ?? 0.5, flags), { low: contentLow, tokens });
+      record(url, contributionFromQuality(r.quality ?? 0.5, flags), {
+        low: contentLow,
+        tokens,
+        learnMeta: false,
+      });
     }
     return domains;
   }
 
-  /** 低相关折叠簇的负反馈(聚类展示阶段):与查询无关 → 轻负信号(0.35,不冤枉内容站)。
-   * **只学域名级,不学模式**:折叠是“与查询主题无关”,不是“内容低质” ——
-   * 若教给模式,正常站(词典页/导航页等高质但主题不匹配的页)的标题 token 会被学负,
-   * 下次该站出现时被误降权(语义混淆)。域名级轻负只影响该域本身,不扩散。 */
-  function learnCollapsed(collapsed) {
-    for (const c of collapsed || []) {
-      for (const x of c.items || []) {
-        if (x?.url) record(x.url, 0.35, { low: true, tokens: new Set() });
-      }
-    }
+  /**
+   * @deprecated 查询相关性不能作为全局域名质量标签。保留空操作以兼容旧调用方;
+   * 折叠只应影响当前查询的展示,不应改变跨查询持久化信誉。
+   */
+  function learnCollapsed(_collapsed) {
+    return domains;
   }
 
   /** fetch 实测反馈(空壳/404/网络失败 → 0.1 负):“页面打不开/没内容”才是可靠负信号,
@@ -263,7 +277,13 @@ export function createDomainReputation({ file = REP_FILE } = {}) {
       }
     }
     const tokens = extractLearnFeatures(url, extra);
-    record(url, contrib, { low: contrib < 0.35, strong: true, tokens });
+    record(url, contrib, {
+      low: contrib < 0.35,
+      strong: true,
+      tokens,
+      // 正文可访问但 LLM 不可用时 contrib=0.6,这不是独立的内容可信度标签。
+      learnMeta: softScore !== null,
+    });
     for (const key of repKeys(url)) {
       const e = getEntry(key);
       updateFetchScore(e, contrib);

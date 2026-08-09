@@ -70,10 +70,12 @@ node scripts/websearch.mjs timeline "美伊冲突" --limit 8
 
 ## 域名信誉系统(自动,无需手动操作)
 
-- 每次搜索自动学习:域名信誉分 + 元学习模式(token 权重),持久化在
+- 每次搜索自动学习域名自身信誉;跨域 token 模式只从显式 LLM 判断或 fetch 等独立证据学习,持久化在
   `~/.cache/websearch-domain-rep.json`(跨进程积累,无需清理)
-- 学习信号:**LLM 内容可信度判断为主**(每次搜索批量判断结果是否软文,
-  默认 deepseek 直连,自动降级);fetch 实测为最强信号
+- 学习信号:默认本地 quality/低质标记只更新当前域名,不反训跨域 token(避免目标泄漏);
+  LLM 内容可信度判断是显式选择的跨域模式增强功能
+  (`WEBSEARCH_LLM_ENABLED=1` + `WEBSEARCH_LLM_PROVIDER=...`),未启用时不会外发搜索摘要或正文片段;
+  fetch 实测为最强信号
 - 结果里出现的 `⚠[rep:0.31]`/`✓[rep:0.82]`/`[meta:0.71]` 是信誉 badge
   (低信誉/高信誉/新域名冷启动预测)—— 低信誉仅软降权(排序靠后),**不剔除**
 
@@ -96,7 +98,7 @@ node scripts/websearch.mjs timeline "美伊冲突" --limit 8
 
 - 降级日志:输出里 `grep '[degrade]'`
 - 调参:环境变量 + `scripts/lib/config.mjs`(全量参数表见 README「配置与环境变量」)
-- 测试:`cd ~/.pi/agent/skills/websearch && npm test`(116 用例)
+- 测试:`cd ~/.pi/agent/skills/websearch && npm test`(246 用例)
 - 站点改版回归:`npm run fixtures` 重抓真实页快照,仍失败则更新解析器
 
 ## 更多

@@ -157,6 +157,8 @@ test("聚合: URL 去重(www 变体)+ 主引擎优先 + src 标记", async () =>
   assert.equal(r.results[0].title, "A", "主引擎(bing)结果在前");
   assert.equal(r.results[0].src, "bing");
   assert.equal(r.results[1].src, "baidu");
+  assert.equal(r.results[0].sourceRank, 1, "主引擎结果保留来源内名次");
+  assert.equal(r.results[1].sourceRank, 1, "补充引擎第 1 名不应变成全局末位名次");
 });
 
 
@@ -217,4 +219,3 @@ test("聚合: 预算耗尽时全部跳过", async () => {
 });
 
 // ---- 层③ JSON 结构化提取(serp-generic.mjs) ----
-

@@ -5,20 +5,18 @@
  * cli(runSearch)/format(printResults)/fetch-flow(runFetch) 三处复用 rep 与学习编排,
  * 避免学习队列逻辑散落在调度与展示层。
  *
- * 学习模型:每次搜索结果自动学习(LLM 判内容可信度 → 元学习可靠 label),
- * 每次 fetch 回写实测质量。LLM 请求失败自动降级 quality 学习,照常保存。
+ * 学习模型:每次搜索结果自动学习;显式启用 LLM 时用其内容可信度 label 增强,
+ * 否则使用本地 quality。每次 fetch 回写实测质量,LLM 失败不影响保存。
  */
 
 import { createDomainReputation } from "./domain-rep.mjs";
+import { LLM_WAIT_MS } from "./config.mjs";
 
 /** 域名信誉学习单例(跨 CLI 进程持久化;每次搜索自动学习,每次 fetch 回写实测质量) */
 export const rep = createDomainReputation();
 
-// LLM 学习排队:展示先行(结果已输出),后台 LLM 判断内容可信度 → 可靠 label 学习模式;
-// 串行执行避免并发;进程退出前**阻塞等待** LLM 完成 —— 学习不丢失:
-//   · 通常 2-5 秒(冷判断),热缓存/已知域名 0 秒
-//   · 最坏 = LLM 请求自身 30s 超时 → 返回 null → 降级 quality 学习 → 照常保存
-//   · 等完这次,判断入缓存,所有未来搜索零成本(放弃=下次重判,网络差时永远学不进去)
+// LLM 学习排队:展示先行,后台判断;默认关闭。显式启用时等待仍受 LLM_WAIT_MS
+// 硬上限约束,网络或服务商异常不能拖住 CLI 主流程。
 let llmQueue = Promise.resolve();
 export function queueLLMLearn(results) {
   llmQueue = llmQueue
@@ -32,13 +30,20 @@ export function queueFetchLearn(url, extra) {
     .catch(() => {})
     .then(() => rep.save());
 }
-export async function waitLLM(timeoutMs = 0) {
-  if (!timeoutMs) {
-    await llmQueue; // 阻塞等待(LLM 请求 30s 超时兜底,失败降级 quality 也照常保存)
-    return;
-  }
+export async function waitLLM(timeoutMs = LLM_WAIT_MS) {
+  if (timeoutMs <= 0) return;
   // 带硬超时等待:LLM 学习是后台增强,结果早已打印完,不值得为它阻塞进程退出太久
-  // (大结果集 58 条分 3 片并行 LLM 判断,网络差时接近 30s 上限 —— 交互式搜索会被
-  // 外部超时截断)。超时即放弃本次学习(下次搜索缓存未命中会重判),不抛错、不阻塞。
-  await Promise.race([llmQueue, new Promise((res) => setTimeout(res, timeoutMs))]);
+  // 超时即放弃本次学习(下次搜索缓存未命中会重判),不抛错、不阻塞。
+  let timer;
+  try {
+    await Promise.race([
+      llmQueue,
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

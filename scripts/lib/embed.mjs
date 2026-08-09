@@ -27,12 +27,11 @@
  *   - 本地模型已从缓存删除(搜索本身需联网,离线用不到嵌入)
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync, renameSync, statSync, utimesSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join as pathJoin } from "node:path";
-import { homedir as osHomedir } from "node:os";
 import { createCooldown } from "./cooldown.mjs";
-import { EMBED_MODEL, EMBED_API_BASE, EMBED_API_MODEL, EMBED_API_DIMENSIONS, EMBED_FAIL_FILE } from "./config.mjs";
+import { CACHE_DIR, EMBED_MODEL, EMBED_API_BASE, EMBED_API_MODEL, EMBED_API_DIMENSIONS, EMBED_FAIL_FILE } from "./config.mjs";
 
 let embedder = null; // {extract, model}
 let attempted = false;
@@ -53,12 +52,12 @@ export function resetApiFailState() {
 // ---- 结果向量缓存(磁盘,跨进程持久) ----
 // 场景:agent 对同一搜索调参/重跑(改 limit/阈值/引擎),结果集相同 → 完整复用
 // {qVec, vectors},零 API 调用。CLI 每次运行是独立进程,内存 Map 无意义 → 磁盘持久化
-// (~/.cache/websearch-vectors/,与 reveal 缓存同目录)。key = sha1(model+查询+结果 url 列表),
-// 模型变化自动失效。容量:目录文件 > 300 清空(单文件 ~几百 KB,总量可控)。
-// 结果向量文本本身几乎不重复(实测 34 条唯一率 100%),不做文本级缓存。
+// (~/.cache/websearch-vectors/,与 reveal 缓存同目录)。key 覆盖端点、模型、维度和完整
+// 输入文本,配置或摘要变化自动失效。容量超限时按最近使用时间淘汰最旧条目。
 
-const VEC_CACHE_DIR = pathJoin(osHomedir(), ".cache", "websearch-vectors");
+const VEC_CACHE_DIR = pathJoin(CACHE_DIR, "websearch-vectors");
 const VEC_CACHE_MAX_FILES = 300;
+const VEC_CACHE_VERSION = 2;
 const vecCacheMem = new Map(); // 本次进程内存快取(避免重复读盘)
 
 function vecCachePath(key) {
@@ -72,6 +71,8 @@ function vecCacheLoad(key) {
     const f = vecCachePath(key);
     if (!existsSync(f)) return null;
     const v = JSON.parse(readFileSync(f, "utf8"));
+    const now = new Date();
+    try { utimesSync(f, now, now); } catch { /* 只读缓存仍可命中 */ }
     vecCacheMem.set(key, v); // 后续读内存
     return v;
   } catch {
@@ -82,22 +83,33 @@ function vecCacheLoad(key) {
 function vecCacheSave(key, out) {
   try {
     mkdirSync(VEC_CACHE_DIR, { recursive: true });
-    if (readdirSync(VEC_CACHE_DIR).length > VEC_CACHE_MAX_FILES) {
-      for (const f of readdirSync(VEC_CACHE_DIR)) rmSync(pathJoin(VEC_CACHE_DIR, f), { force: true });
+    const files = readdirSync(VEC_CACHE_DIR).filter((f) => f.endsWith(".json"));
+    const overflow = files.length - VEC_CACHE_MAX_FILES + 1;
+    if (overflow > 0) {
+      files
+        .map((name) => ({ name, mtime: statSync(pathJoin(VEC_CACHE_DIR, name)).mtimeMs }))
+        .sort((a, b) => a.mtime - b.mtime)
+        .slice(0, overflow)
+        .forEach(({ name }) => rmSync(pathJoin(VEC_CACHE_DIR, name), { force: true }));
     }
-    writeFileSync(vecCachePath(key), JSON.stringify(out));
+    const target = vecCachePath(key);
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(out));
+    renameSync(tmp, target);
     vecCacheMem.set(key, out);
   } catch {
     // 缓存失败不影响主流程
   }
 }
 
-/** 测试钩子:清空向量缓存(内存 + 磁盘) */
-export function resetQVecCache() {
+/** 测试钩子:测试环境清内存与隔离磁盘;生产环境默认只清内存。 */
+export function resetQVecCache({ disk = Boolean(process.env.NODE_TEST_CONTEXT) } = {}) {
   vecCacheMem.clear();
   try {
-    if (existsSync(VEC_CACHE_DIR)) {
-      for (const f of readdirSync(VEC_CACHE_DIR)) rmSync(pathJoin(VEC_CACHE_DIR, f), { force: true });
+    if (disk && existsSync(VEC_CACHE_DIR)) {
+      for (const f of readdirSync(VEC_CACHE_DIR).filter((name) => name.endsWith(".json"))) {
+        rmSync(pathJoin(VEC_CACHE_DIR, f), { force: true });
+      }
     }
   } catch {
     // 忽略清理失败
@@ -301,6 +313,7 @@ export async function embedResults(results, { quiet = false, query = "" } = {}) 
 
   // 显式后端:api=强制 API;local/wasm=强制本地(无 key 时兜底)
   const forced = process.env.WEBSEARCH_EMBED_BACKEND;
+  if (forced === "off") return { available: false };
   if (forced === "api") {
     const vectors = await apiEmbedTexts(texts, { quiet });
     if (!vectors) return { available: false };
@@ -315,10 +328,14 @@ export async function embedResults(results, { quiet = false, query = "" } = {}) 
   }
 
   // 默认:API 优先(跑分最高、零本地开销;搜索本身需联网,离线无需本地模型)
-  // 磁盘缓存:同一查询 + 相同结果 url 列表(agent 调参/重跑)→ 完整复用,零 API 调用
-  // key = sha1(model|查询|urls):结果集变化或换模型自动失效;跨进程持久(CLI 重复搜索也命中)
-  const urlKey = results.map((r) => r.url || r.title).join("|");
-  const cacheKey = qText ? createHash("sha1").update(`${EMBED_API_MODEL}|${qText}#${urlKey}`).digest("hex") : null;
+  // 输入内容、provider 配置或算法版本任一变化都必须重新嵌入,防止错误复用旧向量。
+  const cacheKey = qText ? createHash("sha1").update(JSON.stringify({
+    version: VEC_CACHE_VERSION,
+    baseURL: EMBED_API_BASE,
+    model: EMBED_API_MODEL,
+    dimensions: EMBED_API_DIMENSIONS,
+    texts,
+  })).digest("hex") : null;
   if (cacheKey) {
     const hit = vecCacheLoad(cacheKey);
     if (hit) return { available: true, ...hit, model: EMBED_API_MODEL, backend: "api", cached: true };

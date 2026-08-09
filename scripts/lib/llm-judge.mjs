@@ -5,83 +5,97 @@
 // (回测证实:软文站冷启动预测 0.71 > 干净站 0.57,方向性错误)。
 // LLM 能直接判断"内容可信度",提供可靠 label 喂给元学习(learnFromResults → metaLabel)。
 //
-// OpenAI 兼容 API:硅基流动(默认)/ DeepSeek / 任意。配置:
-//   WEBSEARCH_LLM_BASE_URL  (默认 https://api.siliconflow.cn/v1)
-//   WEBSEARCH_LLM_KEY       (默认读 ~/.pi/agent/auth.json 的 deepseek.key,或 SILICONFLOW_API_KEY 等)
-//   WEBSEARCH_LLM_MODEL     (默认 siliconflow 的 deepseek-ai/DeepSeek-V3;用 deepseek 直连时设 deepseek-chat)
-//   WEBSEARCH_LLM_OFF=1     (关闭;失败自动降级,不影响主流程)
+// 该功能会把搜索摘要/正文片段发给外部服务,因此默认关闭。配置:
+//   WEBSEARCH_LLM_ENABLED=1
+//   WEBSEARCH_LLM_PROVIDER=deepseek|siliconflow|openai|custom
+//   WEBSEARCH_LLM_KEY / WEBSEARCH_LLM_BASE_URL / WEBSEARCH_LLM_MODEL 可显式覆盖
+// 已知 provider 只读取自己的 provider key,绝不跨服务商猜测或复用凭据。
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "os";
-import path from "path";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { CACHE_DIR } from "./config.mjs";
 
-const DEFAULTS = {
-  // 默认 deepseek 直连(auth.json 已有 key,开箱即用);硅基流动/其他 OpenAI 兼容:
-  //   WEBSEARCH_LLM_BASE_URL=https://api.siliconflow.cn/v1
-  //   WEBSEARCH_LLM_MODEL=deepseek-ai/DeepSeek-V3
-  //   WEBSEARCH_LLM_KEY=sk-...
-  baseURL: process.env.WEBSEARCH_LLM_BASE_URL || "https://api.deepseek.com",
-  model: process.env.WEBSEARCH_LLM_MODEL || "deepseek-v4-flash",
+const PROVIDERS = {
+  deepseek: {
+    baseURL: "https://api.deepseek.com",
+    model: "deepseek-chat",
+    keyNames: ["DEEPSEEK_API_KEY"],
+  },
+  siliconflow: {
+    baseURL: "https://api.siliconflow.cn/v1",
+    model: "deepseek-ai/DeepSeek-V3",
+    keyNames: ["SILICONFLOW_API_KEY", "SILICONFLOW_KEY"],
+  },
+  openai: {
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-4.1-mini",
+    keyNames: ["OPENAI_API_KEY"],
+  },
 };
 
-function findKey() {
-  if (process.env.WEBSEARCH_LLM_KEY) return process.env.WEBSEARCH_LLM_KEY;
-  for (const env of ["SILICONFLOW_API_KEY", "SILICONFLOW_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"]) {
-    if (process.env[env]) return process.env[env];
-  }
+/** 解析显式 LLM 配置。可注入 env,便于测试凭据边界。 */
+export function llmConfig(env = process.env) {
+  if (env.WEBSEARCH_LLM_ENABLED !== "1" || env.WEBSEARCH_LLM_OFF === "1") return null;
+  const provider = String(env.WEBSEARCH_LLM_PROVIDER || "").toLowerCase();
+  const preset = PROVIDERS[provider];
+  if (!preset && provider !== "custom") return null;
+  const key = env.WEBSEARCH_LLM_KEY || (preset?.keyNames || []).map((name) => env[name]).find(Boolean);
+  const baseURL = env.WEBSEARCH_LLM_BASE_URL || preset?.baseURL;
+  const model = env.WEBSEARCH_LLM_MODEL || preset?.model;
+  if (!key || !baseURL || !model) return null;
   try {
-    const auth = JSON.parse(readFileSync(path.join(homedir(), ".pi/agent/auth.json"), "utf8"));
-    if (auth.deepseek?.key) return auth.deepseek.key;
-  } catch {}
-  return null;
-}
-
-let _cfg = null;
-export function llmConfig() {
-  if (_cfg) return _cfg;
-  const key = findKey();
-  if (!key) return null;
-  _cfg = { baseURL: DEFAULTS.baseURL, model: DEFAULTS.model, key };
-  return _cfg;
+    const parsed = new URL(baseURL);
+    if (!/^https?:$/.test(parsed.protocol)) return null;
+  } catch {
+    return null;
+  }
+  return { provider, baseURL: baseURL.replace(/\/$/, ""), model, key };
 }
 
 const SOFT_DESC =
   "信息聚合站(如百科/文档/官方)、真实问答社区(知乎/贴吧/论坛)里真人讨论/官方文档不算软文。";
 
 // —— 判断缓存:同 URL+标题 30 天内不重判(agent 常连续搜相似问题,命中则零 LLM 调用) ——
-const CACHE_FILE = path.join(homedir(), ".cache", "websearch-llm-judged.json");
+const CACHE_FILE = `${CACHE_DIR}/websearch-llm-judged.json`;
 const CACHE_MAX = 2000;
 const CACHE_TTL_MS = 30 * 86400000;
+const JUDGE_CACHE_VERSION = 2;
 let _cache = null;
 function loadCache() {
   if (_cache) return _cache;
   try { _cache = JSON.parse(readFileSync(CACHE_FILE, "utf8")) || {}; } catch { _cache = {}; }
   return _cache;
 }
-function cacheKey(r) { return (r?.url || "") + "\u0000" + (r?.title || "").slice(0, 60); }
+function cacheKey(r, cfg) {
+  if (!cfg) return "";
+  return [JUDGE_CACHE_VERSION, cfg.provider, cfg.baseURL, cfg.model, r?.url || "", (r?.title || "").slice(0, 60)].join("\u0000");
+}
 /** 查询历史判断缓存(供 fetch 复用搜索结果阶段的标题判断) */
 export function judgeCacheGet(url, title) {
-  const hit = cacheGet({ url, title });
+  const hit = cacheGet({ url, title }, llmConfig());
   return hit; // undefined = 无缓存;有则 {s, t, ty?}
 }
-function cacheGet(r) {
+function cacheGet(r, cfg) {
+  if (!cfg) return undefined;
   const c = loadCache();
-  const k = cacheKey(r);
+  const k = cacheKey(r, cfg);
   const hit = c[k];
   if (hit && Date.now() - hit.t < CACHE_TTL_MS) return hit; // {s, t, ty?}
   if (hit) delete c[k]; // 过期清理
   return undefined;
 }
-function cacheSet(r, score, type = "normal") {
+function cacheSet(r, score, type, cfg) {
   try {
     const c = loadCache();
-    c[cacheKey(r)] = { s: score, t: Date.now(), ty: type };
-    const keys = Object.keys(c);
+    c[cacheKey(r, cfg)] = { s: score, t: Date.now(), ty: type || "normal" };
+    const keys = Object.keys(c).sort((a, b) => (c[a]?.t || 0) - (c[b]?.t || 0));
     if (keys.length > CACHE_MAX) { // LRU:清最早写入的一半
       const half = keys.slice(0, Math.floor(CACHE_MAX / 2));
       for (const k of half) delete c[k];
     }
-    writeFileSync(CACHE_FILE, JSON.stringify(c));
+    mkdirSync(CACHE_DIR, { recursive: true });
+    const tmp = `${CACHE_FILE}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(c));
+    renameSync(tmp, CACHE_FILE);
   } catch (e) { console.error(`[llm-judge] 缓存写入失败: ${e.message}`); }
 }
 
@@ -144,13 +158,13 @@ ${items}`;
  */
 export async function judgeResults(results, max = 35) {
   const cfg = llmConfig();
-  if (!cfg || process.env.WEBSEARCH_LLM_OFF === "1" || !results?.length) return null;
+  if (!cfg || !results?.length) return null;
   if (_inFlight) return null; // 同一时刻只允许一个判断(防并发重复调用)
   const batch = results.slice(0, max);
   const map = new Map();
   const missing = [];
   for (const r of batch) {
-    const hit = cacheGet(r);
+    const hit = cacheGet(r, cfg);
     if (hit !== undefined) map.set(r.url, { score: hit.s, type: hit.ty || "normal" }); // 旧缓存无 ty,兜底 normal
     else missing.push(r);
   }
@@ -168,7 +182,7 @@ export async function judgeResults(results, max = 35) {
         if (got.status === "fulfilled" && got.value) {
           const item = got.value[i % 12];
           map.set(r.url, item);
-          cacheSet(r, item.score, item.type);
+          cacheSet(r, item.score, item.type, cfg);
         }
       });
     } catch (e) {
@@ -180,6 +194,8 @@ export async function judgeResults(results, max = 35) {
   }
   const scores = batch.map((r) => { const v = map.get(r.url); return v ? v.score : 0.5; });
   scores.types = batch.map((r) => { const v = map.get(r.url); return v ? v.type : "normal"; });
+  // 分片可能部分失败。0.5 只是返回契约的中性占位,不得被学习层误当成真实 LLM 标签。
+  scores.judged = batch.map((r) => map.has(r.url));
   return scores; // 分数数组(带 .types 属性,调用方可读取类型)
 }
 
@@ -192,7 +208,7 @@ export async function judgeResults(results, max = 35) {
  */
 export async function judgeText(text, meta = {}) {
   const cfg = llmConfig();
-  if (!cfg || process.env.WEBSEARCH_LLM_OFF === "1" || !text?.trim()) return null;
+  if (!cfg || !text?.trim()) return null;
   const snippet = (meta.title ? `标题:${meta.title}\n` : "") + `正文开头:\n${text.replace(/\s+/g, " ").slice(0, 600)}`;
   const prompt = `你是中文内容质量审核员。判断以下文章正文是不是【低质量内容】,分三类:
 1. SEO软文(soft):营销推荐文 —— 推荐/测评/排行堆砌、"点击咨询/免费领取/限时优惠"导流

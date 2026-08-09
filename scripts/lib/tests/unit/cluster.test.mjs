@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   clusterResults, queryTokens, titleTokens, tokenJaccard, cnGrams, enWords,
-  cosine, readableClusterLabel, cleanTitleForLabel, longestCommonSpan, distinctiveSpan,
+  cosine, isNearDuplicateDesc, readableClusterLabel, cleanTitleForLabel, longestCommonSpan, distinctiveSpan,
 } from "../../cluster.mjs";
 import { loadFixture, clusterFromFixture } from "./helpers.mjs";
 
@@ -96,6 +96,15 @@ test("cluster: 英文标签不跨句子级标点(Welcome, Cot: the → Welcome)"
   assert.ok(/apple/i.test(paren), `括号内短语应保留,实际 \"${paren}\"`);
 });
 
+test("cluster: 英文品牌大小写混排不会退化成词内碎片", () => {
+  const label = readableClusterLabel(
+    ["OpenAI product updates", "openai API reference"],
+    new Map([["e:openai", 2]]),
+    ["e:openai"],
+  );
+  assert.equal(label, "OpenAI", `OpenAI/openai 的公共主题不应退化成 \"pen\",实际 \"${label}\"`);
+});
+
 
 test("cluster: 可读标签 —— 站点样板不劫持 LCS(苹果簇标签仍是 苹果)", () => {
   assert.equal(cleanTitleForLabel("苹果公司_百度百科"), "苹果公司", "剥站点样板");
@@ -166,6 +175,26 @@ test("cluster回归: 无词典词「特斯拉」英文官网簇靠排名信号�
   assert.ok(tesla.score >= 0.2, `英文簇分数应靠排名信号兜底(≥0.2),实际 ${tesla.score}`);
   const zh = clusters.find((c) => c.label === "特斯拉");
   assert.ok(zh && zh.score > tesla.score, `中文簇仍应排前: ${zh?.score} vs ${tesla.score}`);
+});
+
+test("cluster排名: 聚合结果按来源内名次评分,不偏袒先拼接的引擎", () => {
+  const results = [
+    { title: "主引擎第一主题", url: "a", src: "bing", sourceRank: 1, sourceCount: 2 },
+    { title: "主引擎第二主题", url: "b", src: "bing", sourceRank: 2, sourceCount: 2 },
+    { title: "补充引擎第一主题", url: "c", src: "baidu", sourceRank: 1, sourceCount: 2 },
+    { title: "补充引擎第二主题", url: "d", src: "baidu", sourceRank: 2, sourceCount: 2 },
+  ];
+  const { clusters } = clusterResults(results, "完全无文本命中", {
+    vectors: [[1, 0], [0, 1], [-1, 0], [0, -1]],
+    simThreshold: 0.99,
+    dupThreshold: 1.01,
+    bucketSingletons: false,
+  });
+  const firstScores = clusters
+    .filter((c) => c.items[0].sourceRank === 1)
+    .map((c) => c.score);
+  assert.equal(firstScores.length, 2);
+  assert.ok(Math.abs(firstScores[0] - firstScores[1]) < 1e-9, "不同来源的第 1 名排名信号应相同");
 });
 
 
@@ -286,6 +315,9 @@ test("cluster语义: 近似重复折叠计数(duplicates),不重复展示", () =
   assert.ok(main, "主簇存在");
   assert.equal(main.size, 2, "a/b 近似重复折叠后仅 2 条(标题与转载)");
   assert.equal(main.duplicates, 1, "重复计数应为 1");
+  assert.equal(main.duplicateItems.length, 1, "折叠结果详情必须可恢复");
+  assert.equal(main.duplicateItems[0].url, "b");
+  assert.equal(main.duplicateItems[0].duplicateOf, "a");
 });
 
 
@@ -306,7 +338,23 @@ test("cluster语义转载折叠: 换措辞转载(向量+文本证据)折叠,同�
   assert.equal(clusters.reduce((s, c) => s + c.duplicates, 0), 1, "换措辞转载应折叠计数 1");
   const allShown = clusters.flatMap((c) => c.items.map((d) => d.url));
   assert.deepEqual([...allShown].sort(), ["a", "d", "e"], "a/d/e 保留,c 不重复展示");
+  const folded = clusters.flatMap((c) => c.duplicateItems || []);
+  assert.deepEqual(folded.map((d) => d.url), ["c"], "折叠转载 URL 仍可从 duplicateItems 访问");
+  assert.equal(folded[0].duplicateOf, "a", "折叠项指向实际代表结果");
   assert.equal(uncovered.length, 0);
+});
+
+test("cluster语义转载: 长摘要阈值判定保持准确且无需完整 LCS", () => {
+  const shared = "这是用于验证转载识别的连续公共正文片段".repeat(20);
+  assert.ok(
+    isNearDuplicateDesc(`不同开头${shared}`, `另一开头${shared}不同结尾`),
+    "足够长的同源正文应判为近重复",
+  );
+  assert.equal(
+    isNearDuplicateDesc("甲乙丙丁".repeat(500), "完全不同的内容".repeat(500)),
+    false,
+    "长但无足够公共片段的摘要不应误判",
+  );
 });
 
 
@@ -435,6 +483,22 @@ test("cluster语义桶: 单例语义桶合并(融资类归桶,真独立保持单
   assert.ok(plan && plan.size === 2, "2 条方案解读应合成一桶(pairwise 0.9)");
   const singles = clusters.filter((c) => c.size === 1);
   assert.equal(singles.length, 3, "3 条真独立单例保持独立(不误合)");
+});
+
+test("cluster语义桶: Q3 不能突破当前后端的绝对相似度底线", () => {
+  const results = [
+    { title: "甲主题", url: "a" },
+    { title: "乙话题", url: "b" },
+    { title: "丙内容", url: "c" },
+  ];
+  const { clusters } = clusterResults(results, "测试", {
+    vectors: [[1, 0], [0.8, 0.6], [0.8, -0.6]],
+    simThreshold: 0.99,
+    dupThreshold: 1.01,
+    reprintThreshold: 1.01,
+    maxClusterSize: 99,
+  });
+  assert.equal(clusters.length, 3, "所有 pairwise 相似度低于绝对底线时必须保持三个单例");
 });
 
 

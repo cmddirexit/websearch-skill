@@ -1,10 +1,10 @@
 /**
- * rep-score.mjs — 域名信誉评分 + 元学习权重更新(纯函数)
+ * rep-score.mjs — 域名信誉评分 + 在线跨域模式权重更新(纯函数)
  *
  * 从 domain-rep.mjs 拆出(2026-08 重构,domain-rep.mjs 变为实例 + 门面 re-export):
  *   - 样本贡献分(contributionFromQuality)/ 域名级增量更新(updateScore/updateFetchScore)
  *   - 有效分融合 / 时间衰减 / 乘性因子 / 展示 badge
- *   - 元学习:模式预测(predictTokens)+ 在线权重更新(updateMetaTokens,词袋逻辑回归)
+ *   - 在线模式:模式预测(predictTokens)+ 权重更新(updateMetaTokens,词袋逻辑回归)
  *
  * 本文件只依赖 config.mjs(阈值),不依赖文件 IO/实例状态 —— 可单独单测。
  */

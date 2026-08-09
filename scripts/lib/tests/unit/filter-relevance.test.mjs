@@ -178,6 +178,24 @@ test("relevance折叠: collapsedMarkdown 详情含原因/标题/URL,供 reveal �
   assert.equal(collapsedMarkdown([], "q"), "# 低相关折叠(查询: q)\n");
 });
 
+test("relevance折叠: 近似重复项保留 URL 与代表关系", () => {
+  const md = collapsedMarkdown([{
+    label: "同源报道",
+    size: 1,
+    semScore: 0.2,
+    textScore: 0.1,
+    items: [{ title: "原始报道", url: "https://source.example/a" }],
+    duplicateItems: [{
+      title: "转载报道",
+      url: "https://mirror.example/b",
+      duplicateOf: "https://source.example/a",
+    }],
+  }], "查询");
+  assert.match(md, /\[近似重复\] 转载报道/);
+  assert.match(md, /https:\/\/mirror\.example\/b/);
+  assert.match(md, /代表: https:\/\/source\.example\/a/);
+});
+
 
 test("relevance决策: buildPresentation 折叠/展示分流(默认读 config,零传参)", () => {
   const clusters = [

@@ -350,28 +350,39 @@ export function pickDate(html, url = "", opts = {}) {
 export function recordFetchOutcome(url, html, result = {}) {
   if (!html) return;
   const model = getModel();
-  // bodyLen 优先(列表页结果传提取前正文长度 —— 短壳特征才对;否则列表 markdown 几千字符
-  // 会把 bodyShort/bodyMed 特征学成恒 0,与长文文章页特征重合,信号被污染)
-  const raw = (result?.bodyLen !== undefined ? String(result.bodyLen) : (result?.markdown || result?.body || "").trim());
-  const feats = extractPageFeatures(html, url, Number(raw) || 0, "");
+  // bodyLen 优先(列表页结果传提取前正文长度 —— 短壳特征才对);普通文章未显式
+  // 传 bodyLen 时必须取正文字符数,不能对正文字符串做 Number() 而恒变成 0。
+  const bodyLen = result?.bodyLen !== undefined
+    ? Math.max(0, Number(result.bodyLen) || 0)
+    : String(result?.markdown || result?.body || "").trim().length;
+  const feats = extractPageFeatures(html, url, bodyLen, "");
   // 列表页标签:① 结果明确 isList 且条目达标 → 确为列表页;
   // ② 正文达线(≥200)且列表条目不足 3 → 文章页(不受模型 isList 猜测影响,
   // 打破“模型误判列表 → 无纠正信号”的自我强化回路)。
   let label = null;
   if (result?.isList && (result.listCount || 0) >= 3) label = 1;
-  else if (Number(raw) >= 200 && (result?.listCount || 0) < 3) label = 0;
+  else if (bodyLen >= 200 && (result?.listCount || 0) < 3) label = 0;
   if (label !== null) {
     updateLinear(model.list, feats, label, 0.15);
     _dirty = true;
   }
-  // 渲染后正文日期验证:正文出现强规则日期("本文发表于…")→ 候选权重学习
+  // 渲染后正文日期验证:正文出现强规则日期("本文发表于…")→ 对所有候选做监督。
+  // 只给当前选择记一次样本无法强化正确候选,也无法压低同页错误来源。
   const strong = html.match(/(?:本文发表于|文章发布时间|发布于|发表于)[:：]?\s*(20\d{2}[年\/\-.]?\d{1,2}[月\/\-.]?\d{1,2}[日]?)/);
   if (strong) {
     const gt = normalizeCnDate(strong[1]) || extractSerpDate(strong[1]);
     const cands = extractDateCandidates(html, url);
-    if (gt && cands.length >= 1 && !cands.some((c) => c.date === gt)) {
-      // ground truth 不在候选里:说明规则漏了 → 轻惩罚当前选择(规则层有洞,ML 兜不住,只记样本)
-      model.cand.samples = (model.cand.samples || 0) + 1;
+    if (gt && cands.length >= 1) {
+      const listProb = predictLinear(feats, model.list);
+      const urlDate = cands.find((c) => c.source === "url")?.date || "";
+      let matched = false;
+      for (const cand of cands) {
+        const correct = cand.date === gt;
+        matched ||= correct;
+        updateLinear(model.cand, candFeatures(cand, listProb, urlDate), correct ? 1 : 0, 0.08);
+      }
+      // 若强规则日期未被候选生成覆盖,仍记录一次漏召回样本供诊断。
+      if (!matched) model.cand.samples = (model.cand.samples || 0) + 1;
       _dirty = true;
     }
   }

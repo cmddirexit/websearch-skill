@@ -171,13 +171,16 @@ export async function aggregateSearch(engines, query, limit, partners, deadline,
   const merged = [];
   for (const key of filtered) {
     const list = buckets.get(key) || [];
-    for (const r of list) {
+    for (let sourceIndex = 0; sourceIndex < list.length; sourceIndex++) {
+      const r = list[sourceIndex];
       const ukey = normalizeUrl(r.url);
       const tkey = normalizeTitle(r.title);
       if (seen.has(ukey) || seen.has(`t:${tkey}`)) continue;
       seen.add(ukey);
       seen.add(`t:${tkey}`);
-      merged.push({ ...r, src: key });
+      // 保留来源内名次。聚合数组仍按主引擎优先拼接,但相关性评分不能把补充
+      // 引擎的第 1 名误当成全局第 11/21 名。
+      merged.push({ ...r, src: key, sourceRank: sourceIndex + 1, sourceCount: list.length });
       if (counts[key]) counts[key].kept++;
     }
   }

@@ -171,10 +171,12 @@ node scripts/websearch.mjs trending [daily|weekly|monthly] [--limit N]
 
 **语义模式(可选增强,默认自动尝试)**:嵌入余弦 + **贪心首领聚类**(增量质心):
 - 无共享词也能聚(近义/跨语言表达)——实测搜“苹果”短语模式被语言拆成 苹果/Apple 两簇,语义模式正确归并为一簇
-- 与簇心余弦 ≥0.94 视为**近似重复**(同文转载/镜像页)→ 折叠计数 `含 N 条近似重复`,不重复展示
+- 与簇心余弦 ≥0.94 视为**近似重复**(同文转载/镜像页)→ 主列表不重复展示,
+  但完整保留在 `duplicateItems`(含 URL 与 `duplicateOf` 代表 URL),CLI/reveal 均可查看
 - **语义转载折叠预处理**(2025-08 新增,零词表):pairwise 余弦落在 [0.75, 0.94) 区间
   (转载级,实测:转载同文 ~0.95、转载换措辞 ~0.78~0.85、同主题不同文 <0.72~0.80)
-  且**标题或摘要 LCS 近重复** → 后出现者折叠计数,保留代表条(URL 不丢,折叠详情可查)。
+  且**标题近重复或摘要存在足够长公共连续片段** → 后出现者折叠。摘要先预计算 20 字窗口哈希,
+  命中后再用线性时间后缀自动机精确验证,避免默认 99 条下 pairwise 完整 LCS 的二次开销。
   换措辞转载(标题用词全不同但正文同源,实测 ~0.84)可折叠;同主题不同文(向量可能
   0.75~0.85 但标题摘要都不同)不误杀 —— 比聚合层字符 LCS 硬过滤更准、更软
   (硬过滤已移除:近似转载不再在聚合合并时丢弃,统一由本层语义折叠)。
@@ -190,9 +192,9 @@ node scripts/websearch.mjs trending [daily|weekly|monthly] [--limit N]
     (27 条主簇成员与质心内积 0.72~0.79 vs pairwise 0.58~0.81)使固定阈值拆不开,故改数据驱动
 - **单例语义桶合并**(拆分后剩余单例 ≥3 时启用,`WEBSEARCH_BUCKET_SINGLETONS=0` 关闭):
   单例(文本不共享短语但语义同属一类,如“融资/方案解读/官方站”)用 **UPGMA 平均链接**
-  层次聚类合并成小桶(≤`WEBSEARCH_MAX_BUCKET_SIZE`=6 条)。同样零固定阈值:
-  合并截止 = 合并高度 ≥ 单例集合 pairwise 的 Q3(75 分位)+ 最大 gap 截断
-  (低于 Q3 的相似度在单例集合里“太普通”不构成桶;单例互不相关时 Q3 低,自然零合并);
+  层次聚类合并成小桶(≤`WEBSEARCH_MAX_BUCKET_SIZE`=6 条)。合并必须同时满足当前嵌入后端的
+  **绝对相似度底线**(`simThreshold`)与单例集合 Q3(75 分位),再用最大 gap 截断;
+  Q3 不能单独迫使一组普遍为正但不相关的向量合并。
   平均链接(桶间相似度 = 两桶成员 pairwise 均值)防单链接链式污染。
   实测“虚拟细胞大赛”13 个单例 → 融资桶(注册资本加注/2000亿赌局/晶泰融资/GPT时刻 4 条)+
   方案解读桶(2 条)+ 官方站桶(2 条),真无关者保持单例
@@ -207,7 +209,7 @@ node scripts/websearch.mjs trending [daily|weekly|monthly] [--limit N]
     存储/计算(UPGMA pairwise 等 O(n²)×dim)省 4 倍;不支持的提供商(400/422)自动去掉重试
   - **失败记忆 + 退避重试**:429/5xx/网络错误退避重试(3 次,间隔递增);连续失败 2 次
     → 冷却 5 分钟不再请求(限流/故障时避免每次搜索白等 + 雪上加霜),成功自动恢复
-  - **结果向量磁盘缓存**(`~/.cache/websearch-vectors/`,key=sha1(模型+查询+url 列表)):
+  - **结果向量磁盘缓存**(`~/.cache/websearch-vectors/`,key=sha1(schema+endpoint+模型+维度+实际输入文本)):
     同一搜索调参/重跑(改 limit/阈值/引擎)完整复用 {qVec, vectors} 零 API 调用;
     跨进程持久(CLI 每次独立进程也命中),换模型自动失效,目录超 300 文件自动清空
 - **本地 WASM 仅作无 key 时兜底**(`WEBSEARCH_EMBED_BACKEND=local` 强制):模型默认
@@ -220,7 +222,8 @@ node scripts/websearch.mjs trending [daily|weekly|monthly] [--limit N]
 ### 相关性打分(双模式共用)
 
 `0.7×查询 token 文本命中率`(按簇内命中文档占比加权,10 条簇仅 1 条相关不会虚高)
-`+ 0.3×引擎排名信号`(跨语言兜底),再乘以**质量因子**(0.5 + 0.5×簇内平均质量)。
+`+ 0.3×引擎排名信号`(聚合时按各来源内部名次归一化,避免补充引擎第 1 名被当成全局末位),
+再乘以**质量因子**(0.5 + 0.5×簇内平均质量)。
 低于 `noiseScore=0.3` 的簇标记 `⚠️低相关`。
 
 ### 语义相关性重排(ML 温和过滤,queryVec 可用时)
@@ -248,6 +251,7 @@ node scripts/websearch.mjs trending [daily|weekly|monthly] [--limit N]
 - **阈值自适应**:基于当前结果集最高语义分 top 的比例 + 绝对下限双保险,防模型/语言漂移
 - 模式:`WEBSEARCH_REL_MODE=balanced`(默认,折叠)/ `conservative`(只排序不折叠,全展开)/ `aggressive`(同 balanced)
 - 语义不可用时全部走原逻辑(零回归);语义模式低相关单例簇同样折叠(聚类漏判的低相关单条自动进折叠区)
+- 折叠只属于本次查询的展示决策,**不会写入跨查询域名信誉**;“对当前查询无关”不等于“站点低质量”
 
 ### 已知边界与缓解(实测验证)
 
@@ -643,7 +647,7 @@ export async function searchXxx(query, limit) {
 
 ```bash
 cd ~/.pi/agent/skills/websearch
-npm test       # 单元回归 node --experimental-test-module-mocks --test scripts/lib/tests/unit/*.test.mjs(192 用例,≈5s)
+npm test       # 单元回归 node --experimental-test-module-mocks --test scripts/lib/tests/unit/*.test.mjs(246 用例,≈3s)
        # ⚠ 脚本已带 --experimental-test-module-mocks(cli 决策链测试依赖 mock.module)
        # 手动 node --test 跑 cli.test.mjs 会 skip(提示用 npm test),不崩
        # npm run test:integration 慢测试(浏览器/网络/TLS 后端,5 用例)
@@ -664,30 +668,31 @@ npm run fixtures   # 重抓真实搜索页快照(站点改版时)
 
 ---
 
-## 域名信誉评分 + 双循环元学习(domain-rep.mjs)
+## 域名信誉评分 + 在线跨域模式学习(domain-rep.mjs)
 
 中文搜索结果的软文污染是动态演化的(SEO 站群换域名/换路径/换模板),静态黑名单或
 `site:` 限定治标不治本。本系统从**每次搜索结果 + 每次 fetch 实测**学习,对域名评分后
 **软降权**(压沉不剔除,URL 永不丢),且新域名(站群换域名)无需积累样本即可冷启动预测。
 
-### 双循环结构(元学习)
+历史版本称其为“元学习”;准确地说,它是带持久化、时间衰减和冷启动应用的在线逻辑回归,
+不是 MAML 等 learning-to-learn 算法。
+
+### 双层结构
 
 ```
 ┌─ 内循环(模式学习):已知域名样本(学习式 token 特征 + 实际质量贡献)
 │     → 在线更新 token 权重(词袋逻辑回归,特征从数据中涌现、无人工词表)
 │ 外循环(冷启动匹配):新域名首次出现(无自身样本)
 │     → 提取 token → 模式权重预测初始信誉分,立即软降权/加权
-└─ 反馈闭环:新域名每次出现的新数据同时更新
-      ① 该域名自身信誉分(域名级学习) ② 模式权重(模式持续演化)
+└─ 反馈边界:每次结果更新域名自身;只有独立质量标签才更新跨域模式权重
 ```
 
 ### 三级信号(弱→强)
 
 | 信号 | 来源 | 说明 |
 |---|---|---|
-| **LLM 内容可信度判断**(主) | 每次搜索结果批量调 LLM(OpenAI 兼容,默认 deepseek,可切硅基流动) | 判断每条结果是否 SEO 软文 → 可靠 label 驱动**域名级 + 模式级**学习;失败自动降级 quality |
-| 规则质量分 quality + 低质标记 | filter.mjs | 推断信号,仅 LLM 不可用时的兜底 |
-| 低相关折叠 | 聚类展示阶段 | 该域结果与查询无关 → 轻负(0.35,不冤枉内容站) |
+| **LLM 内容可信度判断**(可选增强) | 用户显式启用后批量调用指定的 OpenAI 兼容 provider | 独立 label 驱动**域名级 + 跨域模式级**学习;失败时仅降级到域名级 quality |
+| 规则质量分 quality + 低质标记 | filter.mjs | 默认信号,只更新该域名自身;不反训跨域 token,避免特征→标签→特征的目标泄漏 |
 | fetch 实测正文质量 | fetch 命令回写 | 三分类(`classifyFetchResult`,纯函数):正文完整 → **LLM 判内容可信度**(软文正文完整也能打开,不能因"能抓到"就给正;LLM 失败保底温和正 0.6);**反爬/风控拦截(403/40362/验证码)→ 中性只计 `fetchBlocked` 不降分**(内容可能很好只是被拦,见 `learnFetchBlocked`);真空壳/404/HTTP 错误 → 0.1 负反馈;网络/浏览器环境错误 → 中性不降分;strong 固定大学习率 |
 
 ### LLM 判定(为何必要)
@@ -698,14 +703,18 @@ quality 分是“形态可用性分”,不是“内容可信度分”——软�
 换成 LLM 判断后:软文模板站冷启动预测降到 **0.35**(降权),干净站/普通站中性;
 真实搜索里企业博客软文域名分从 1.00 降到 **0.09** ⚠。
 
-LLM 配置(OpenAI 兼容,默认开箱即用):
-- `WEBSEARCH_LLM_BASE_URL` / `WEBSEARCH_LLM_MODEL` / `WEBSEARCH_LLM_KEY`
-- 默认 deepseek 直连(读 ~/.pi/agent/auth.json 的 deepseek.key);硅基流动:
-  `WEBSEARCH_LLM_BASE_URL=https://api.siliconflow.cn/v1 WEBSEARCH_LLM_MODEL=deepseek-ai/DeepSeek-V3`
-- `WEBSEARCH_LLM_OFF=1` 关闭(降级 quality);LLM 失败自动降级 quality 学习并照常保存
-- **进程退出前阻塞等待 LLM 判断完成**(学习不丢失):展示先行,结果已输出后才等;
-  通常 2-5 秒(冷判断),热缓存/已知域名 0 秒;最坏 = LLM 请求自身 30s 超时 → 降级保存;
-  等完这次判断入缓存,后续所有搜索零成本
+LLM 配置(OpenAI 兼容,**默认关闭**):
+- 此功能会向外部服务发送搜索结果的标题/域名/摘要,`fetch` 学习会发送正文开头最多 600 字;
+  只有明确接受该数据流向时才启用
+- 启用必须同时设置 `WEBSEARCH_LLM_ENABLED=1` 与
+  `WEBSEARCH_LLM_PROVIDER=deepseek|siliconflow|openai|custom`
+- 已知 provider 只读取自己的 key:`DEEPSEEK_API_KEY` / `SILICONFLOW_API_KEY` /
+  `OPENAI_API_KEY`;绝不跨 provider 猜 key,也不读取其他应用的认证文件
+- `custom` 必须显式设置 `WEBSEARCH_LLM_KEY`、`WEBSEARCH_LLM_BASE_URL`、
+  `WEBSEARCH_LLM_MODEL`;已知 provider 也可用这三个变量覆盖默认值
+- `WEBSEARCH_LLM_WAIT_MS` 默认 3000ms,限制结果输出后的学习等待;设为 0 完全不等待
+- `WEBSEARCH_LLM_OFF=1` 是总关闭开关;LLM 未启用/失败时本地 quality 继续更新域名自身,
+  但不会训练跨域 token 模型
 - 批量判断(一次最多 35 条),返回每条的**低质分 + 类型** → label = 0.05 + 0.9×(1−低质分)
 
 ### 低质三类(LLM 判断维度)
@@ -731,7 +740,7 @@ fetch 复用搜索阶段的标题类型做综合判断(防“标题软文 + 正�
 - URL:路径段(`u:` 前缀,纯数字段归一化为 `u:n` 防日期过拟合)+ 域名标签(`d:` 前缀)
 - 内容:filter.mjs 低质标记映射(`f:spam-desc` 等)
 
-哪个 token 预示低质,**由权重在线学习决定**:token 频繁出现在低质样本 → 权重自动变负,
+哪个 token 预示低质,**由独立质量证据在线学习决定**:token 频繁出现在低质样本 → 权重自动变负,
 频繁出现在高质量样本 → 变正;高频泛词被大量不同质量样本平均 → 权重趋 0,自动无害。
 
 ### 关键设计决策
@@ -754,6 +763,7 @@ fetch 复用搜索阶段的标题类型做综合判断(防“标题软文 + 正�
 ### 持久化
 
 `~/.cache/websearch-domain-rep.json`(跨 CLI 进程增量积累;域名上限 5000,超限清最久未见;token 权重上限 6000)。
+当前 schema v3;旧版模型曾混入查询相关性和规则自训练信号,加载时自动失效并从中性重新学习。
 
 ---
 
@@ -766,17 +776,21 @@ fetch 复用搜索阶段的标题类型做综合判断(防“标题软文 + 正�
 | `SILICONFLOW_API_KEY`(或技能目录 `.env.json`) | - | 语义嵌入 API key(硅基流动) |
 | `SILICONFLOW_EMBED_MODEL` | `Qwen/Qwen3-Embedding-8B` | API 嵌入模型(可换 `BAAI/bge-m3`) |
 | `SILICONFLOW_API_BASE` | `https://api.siliconflow.cn/v1` | OpenAI 兼容嵌入 API 基址 |
-| `WEBSEARCH_EMBED_BACKEND` | api | `local` 强制本地 WASM 兜底 |
+| `WEBSEARCH_EMBED_BACKEND` | auto | `api` 强制 API / `local`或`wasm`强制本地 / `off`完全关闭 |
 | `WEBSEARCH_EMBED_MODEL` | `Xenova/bge-small-zh-v1.5` | 本地嵌入模型(中英混合换 multilingual-e5-small) |
 | `WEBSEARCH_SIM_THRESHOLD` | 0.42(本地)/0.5(API 自动) | 聚类相似度阈值(换 e5-small 需调 0.8) |
 | `WEBSEARCH_REPRINT_THRESHOLD` | 0.75 | 语义转载折叠候选门槛(0.75~0.94 区间需标题/摘要 LCS 文本证据) |
 | `WEBSEARCH_MAX_CLUSTER_SIZE` | 12 | 超大簇拆分启动阈值(簇成员数超过则做动态拆分检查) |
-| `WEBSEARCH_BUCKET_SINGLETONS` | 1(默认开) | 单例语义桶合并(UPGMA,零固定阈值;=0 关闭) |
+| `WEBSEARCH_BUCKET_SINGLETONS` | 1(默认开) | 单例语义桶合并(UPGMA + 后端绝对相似度底线;=0 关闭) |
 | `WEBSEARCH_MAX_BUCKET_SIZE` | 6 | 语义桶规模上限(防一桶吞下所有单例) |
 | `EMBED_API_DIMENSIONS` | 1024 | API 嵌入 MRL 输出维度压缩(实测 4096→1024 相似度误差<0.005,存储/计算省 4 倍;0=不压缩;不支持的提供商自动回退全维) |
 | `WEBSEARCH_SEM_WEIGHT` | 0.45 | 语义相关性在簇分数中的权重 |
 | `WEBSEARCH_SEM_NOISE` | 0.32 | 语义低相关判定阈值 |
 | `WEBSEARCH_REL_MODE` | balanced | `conservative` 只排序不折叠 / `aggressive` 同 balanced |
+| `WEBSEARCH_LLM_ENABLED` | 0(关) | 设为 1 后才允许向外部 LLM 发送搜索摘要/正文片段 |
+| `WEBSEARCH_LLM_PROVIDER` | - | `deepseek` / `siliconflow` / `openai` / `custom`;凭据按 provider 隔离 |
+| `WEBSEARCH_LLM_WAIT_MS` | 3000 | CLI 等待可选 LLM 学习的上限(ms);0=不等待 |
+| `WEBSEARCH_CACHE_DIR` | `~/.cache` | 缓存根目录;测试进程自动改用 `/tmp` 隔离目录 |
 | `WEBSEARCH_BROWSER_PATH` | 自动探测 | 指定浏览器可执行文件 |
 | `SEARX_INSTANCE` | priv.au/searxng.site | SearXNG 公共实例 |
 | `DOMAIN_RATE_LIMIT_MS` | 1500 | 同域连续请求最小间隔 |
@@ -784,7 +798,7 @@ fetch 复用搜索阶段的标题类型做综合判断(防“标题软文 + 正�
 | `WEBSEARCH_DEBUG` | 0(关) | 结构化决策追踪:输出抓取/降级链完整决策(每步耗时 + 各通道结果长度),快速定位卡点。`WEBSEARCH_DEBUG=1 node scripts/websearch.mjs fetch "URL"` 示例见下 |
 | `TLS_FAIL_THRESHOLD` / `TLS_COOLDOWN_MS` | 2 / 30min | TLS 兜底失败记忆:域名连续失败达阈值进入冷却,期内跳过 impersonate(硬拦站不白等);成功清零 |
 | `WEBSEARCH_REP_STRENGTH` | 1.6 | 域名信誉分 → quality 乘性因子映射斜率(0.5→1.0,0→0.35,1→1.15) |
-| `WEBSEARCH_META_LR` | 0.05 | 元学习 token 权重在线学习率(随样本数递减) |
+| `WEBSEARCH_META_LR` | 0.05 | 跨域模式 token 权重在线学习率(变量名为兼容历史配置) |
 | `WEBSEARCH_META_STRONG_LR` | 0.2 | fetch 实测等强信号的固定学习率(不被递减 lr 稀释) |
 | `WEBSEARCH_META_MIN_SAMPLES` | 30 | 模式库最少样本数,少于时冷启动预测不启用 |
 | `WEBSEARCH_META_MAX_WEIGHTS` | 6000 | 学习式 token 权重上限(超限清最久未见一半) |
@@ -821,9 +835,9 @@ websearch/
         ├── format.mjs          # 展示层:搜索结果(过滤→聚类流水线)/抓取/榜单输出 + 页面缓存写入
         ├── fetch-flow.mjs      # 抓取调度:runFetch 决策链(缓存/直连/空壳/CF/404)+ 存档兜底
         ├── learn.mjs           # 域名信誉单例 + LLM 学习队列(queueLLMLearn/waitLLM,展示先行退出前落盘)
-        ├── domain-rep.mjs     # 域名信誉实例 + 门面 re-export(双循环元学习编排:域名级+模式级)
+        ├── domain-rep.mjs     # 域名信誉实例 + 门面 re-export(域名级+在线跨域模式编排)
         ├── rep-features.mjs   # 信誉特征提取(纯函数):域名解析/引擎域排除 + 学习式 token(标题/URL/内容标记)
-        ├── rep-score.mjs      # 信誉评分纯函数:贡献分/增量更新/时间衰减/乘性因子/badge + 元学习权重更新
+        ├── rep-score.mjs      # 信誉评分纯函数:贡献分/增量更新/时间衰减/乘性因子/badge + 在线模式权重更新
         ├── http.mjs            # HTTP 封装(UA/超时/限速/Cookie 持久化/httpGetJson/tcpProbe)
         ├── tls.mjs             # TLS 指纹兜底(curl-impersonate/curl_cffi,JA3/JA4 对抗)
         ├── html.mjs            # 实体解码、标签剥离、文本清洗
@@ -831,7 +845,7 @@ websearch/
         ├── embed.mjs           # 可选语义嵌入层(transformers.js,不可用自动降级)
         ├── cluster.mjs         # ★ 聚类组织门面:clusterResults 主函数 + DEFAULT_OPTIONS + 全部公共导出(re-export)
         ├── cluster-phrase.mjs  # 短语模式:分词工具(cnGrams/enWords/queryTokens/titleTokens...)+ STC 建簇(零依赖)
-        ├── cluster-semantic.mjs# 语义模式:余弦/转载检测 + 贪心首领聚类/超大簇拆分/单例桶合并(零固定阈值)
+        ├── cluster-semantic.mjs# 语义模式:余弦/转载检测 + 贪心首领聚类/超大簇拆分/带绝对底线的单例桶
         ├── cluster-labels.mjs  # 可读簇标签/簇内差异标注(站点样板清洗 + LCS,纯字符串工具)
         ├── fetch-page.mjs      # 正文提取:Readability 优先,正则回退,Markdown 输出(turndown)
         ├── fixtures/           # ★ 真实搜索页快照(gzip,测试回归用)
@@ -850,7 +864,10 @@ websearch/
             ├── hotlist.mjs     # 平台热搜榜(weibo/douyin/baidu/toutiao)
             ├── trending.mjs    # GitHub 热门项目榜
             ├── searx.mjs       # SearXNG 实例聚合(可选,已排除默认聚合)
-            ├── browser.mjs     # Chromium 浏览器兜底(三层能力,可选;stealth/拟人行为已拆子模块)
+            ├── browser.mjs     # Chromium 浏览器兜底编排 + 渲染结果判定(公共门面)
+            ├── browser-runtime.mjs # 二进制/驱动探测 + 共享浏览器生命周期
+            ├── browser-cli.mjs # 一次性 chromium --dump-dom 进程通道
+            ├── browser-zendriver.mjs # Zendriver 可选快速通道
             ├── browser-stealth.mjs  # stealth 注入脚本(抹 webdriver/补插件/Canvas 噪声,纯静态资源)
             ├── browser-humanize.mjs # 拟人行为(bezierPath 纯函数 + humanize 鼠标/滚动)
             ├── factory.mjs     # 直连型引擎工厂(URL+parse 纯函数即引擎)
@@ -1094,7 +1111,7 @@ fetch 命令正文提取用 **Mozilla 官方 @mozilla/readability**(Firefox 阅�
   scripts/lib/tests/ 下 9 个测试文件 + 共享 helpers.mjs(loadFixture/assertResultShape/
   clusterFromFixture/mockEngine)。块边界按 `^test(` 行首切分,零括号解析;
   新增测试:加到对应模块文件,共享 fixture 放 helpers.mjs。
-- **测试单元/集成双层化**(2026-08):tests/ 按速度分层——`unit/`(141 用例,纯函数
+- **测试单元/集成双层化**(2026-08):tests/ 按速度分层——`unit/`(246 用例,纯函数
   + 本地 fixture,`npm test` ≈ 3 秒)与 `integration/`(5 用例,真实 Chromium/网络/
   TLS 后端,`npm run test:integration`)。三个命令:
   `npm test`(unit 快回归)/ `npm run test:integration`(慢测试)/ `npm run test:all`(146 全量)。

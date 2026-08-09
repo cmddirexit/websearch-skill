@@ -10,6 +10,8 @@ test("embed韧性: 同查询+同结果集缓存命中 → 零 API 调用", async
   const { embedResults, resetQVecCache } = await import("../../embed.mjs");
   resetQVecCache();
   const realFetch = globalThis.fetch;
+  const realKey = process.env.SILICONFLOW_API_KEY;
+  process.env.SILICONFLOW_API_KEY = "test-only";
   let calls = 0;
   globalThis.fetch = async (_url, opts) => {
     calls++;
@@ -37,12 +39,17 @@ test("embed韧性: 同查询+同结果集缓存命中 → 零 API 调用", async
     const r2 = await embedResults(results, { query: "虚拟细胞大赛" });
     assert.equal(calls, 1, "缓存命中不调 API");
     assert.deepEqual(r2.qVec, r1.qVec, "缓存向量一致");
+    // URL 不变但摘要变化 → 缓存键也必须变化,不能复用陈旧向量
+    await embedResults([{ ...results[0], desc: "changed" }, results[1]], { query: "虚拟细胞大赛" });
+    assert.equal(calls, 2, "输入内容变化则重新嵌入");
     // 结果集不同(同一查询)→ 重新调 API
     const r3 = await embedResults([{ title: "x", url: "u3", desc: "d3" }], { query: "虚拟细胞大赛" });
-    assert.equal(calls, 2, "结果集变化则重新嵌入");
+    assert.equal(calls, 3, "结果集变化则重新嵌入");
     assert.ok(r3.qVec, "新结果集仍返回查询向量");
   } finally {
     globalThis.fetch = realFetch;
+    if (realKey === undefined) delete process.env.SILICONFLOW_API_KEY;
+    else process.env.SILICONFLOW_API_KEY = realKey;
   }
 });
 
@@ -52,6 +59,8 @@ test("embed韧性: 连续失败进入冷却期(不再请求),成功恢复", asyn
   resetApiFailState();
   resetQVecCache();
   const realFetch = globalThis.fetch;
+  const realKey = process.env.SILICONFLOW_API_KEY;
+  process.env.SILICONFLOW_API_KEY = "test-only";
   let failMode = true; // 先全部 500,后恢复 200
   let calls = 0;
   globalThis.fetch = async () => {
@@ -83,8 +92,28 @@ test("embed韧性: 连续失败进入冷却期(不再请求),成功恢复", asyn
     assert.equal(r3.available, true, "状态重置后 API 恢复");
   } finally {
     globalThis.fetch = realFetch;
+    if (realKey === undefined) delete process.env.SILICONFLOW_API_KEY;
+    else process.env.SILICONFLOW_API_KEY = realKey;
     resetApiFailState();
     resetQVecCache();
+  }
+});
+
+test("embed后端: WEBSEARCH_EMBED_BACKEND=off 不读 key、不请求网络", async () => {
+  const { embedResults } = await import("../../embed.mjs");
+  const realBackend = process.env.WEBSEARCH_EMBED_BACKEND;
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  process.env.WEBSEARCH_EMBED_BACKEND = "off";
+  globalThis.fetch = async () => { calls++; throw new Error("不应请求"); };
+  try {
+    const out = await embedResults([{ title: "t", url: "u", desc: "d" }], { query: "q" });
+    assert.equal(out.available, false);
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (realBackend === undefined) delete process.env.WEBSEARCH_EMBED_BACKEND;
+    else process.env.WEBSEARCH_EMBED_BACKEND = realBackend;
   }
 });
 
@@ -168,5 +197,4 @@ test("tls: 成功清零 —— 失败后成功恢复,计数归零不误伤", asy
   assert.ok(!isTlsHostCooled(host), "成功清零后 1 次失败不应进入冷却");
   resetTlsFailState();
 });
-
 

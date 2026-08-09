@@ -9,7 +9,13 @@
  * 本模块只做"如何展示/是否写缓存",调度决策(走哪条抓取链)在 cli.mjs / fetch-flow.mjs。
  */
 
-import { REVEAL_FILE, EMBED_API_SIM_THRESHOLD, REP_FETCH_MIN_OK_CHARS } from "./config.mjs";
+import {
+  CLUSTER_SIM_THRESHOLD,
+  EMBED_API_SIM_THRESHOLD,
+  REVEAL_FILE,
+  REP_FETCH_MIN_OK_CHARS,
+  envNumber,
+} from "./config.mjs";
 import { clusterResults, cosine } from "./cluster.mjs";
 import { filterResults, applyRecencyOrder } from "./filter.mjs";
 import { stripControl } from "./html.mjs";
@@ -19,6 +25,18 @@ import { classifyFetchResult } from "./antiblock.mjs";
 import { pageCachePut } from "./persist.mjs";
 import { dbg } from "./debug.mjs";
 import { rep, queueLLMLearn } from "./learn.mjs";
+
+/** Build per-run cluster settings without mutating process.env. */
+export function semanticClusterOptions(embedding, env = process.env) {
+  const fallback = embedding?.backend === "api"
+    ? EMBED_API_SIM_THRESHOLD
+    : CLUSTER_SIM_THRESHOLD;
+  return {
+    vectors: embedding?.vectors || null,
+    ...(embedding?.qVec ? { queryVec: embedding.qVec } : {}),
+    simThreshold: envNumber("WEBSEARCH_SIM_THRESHOLD", fallback, env),
+  };
+}
 
 /** 输出搜索结果:默认 过滤→聚类(两阶段流水线);--flat 平铺 */
 export async function printResults(r, query, flat = false, semantic = null) {
@@ -46,25 +64,24 @@ export async function printResults(r, query, flat = false, semantic = null) {
     if (semantic !== false) {
       try {
         // query 一起嵌入 → qVec(query↔文档语义相关性重排的 ML 基础)
-        em = await embedResults(kept, { quiet: semantic !== true, query });
+        // 向量必须与传给 clusterResults 的 ordered 严格同序。时间意图查询可能已把
+        // 旧文移到末尾,若仍嵌入 kept,每条结果会按位置拿到另一篇文章的向量。
+        em = await embedResults(ordered, { quiet: semantic !== true, query });
         if (em.available) {
           vectors = em.vectors;
           qVec = em.qVec || null;
           backend = em.backend;
-          // API 后端的相似度分布与本地不同(Qwen3-8B 同 0.58~0.72 vs 异 0.32~0.45):
-          // 用 API 专用阈值,除非用户显式设了 WEBSEARCH_SIM_THRESHOLD
-          if (backend === "api" && !process.env.WEBSEARCH_SIM_THRESHOLD) {
-            process.env.WEBSEARCH_SIM_THRESHOLD = String(EMBED_API_SIM_THRESHOLD);
-          }
         }
       } catch {
         vectors = null; // 嵌入失败不阻断主流程
       }
     }
-    const { clusters, uncovered } = clusterResults(ordered, query, {
-      vectors,
-      ...(qVec ? { queryVec: qVec } : {}),
-    });
+    // API 与本地模型的相似度分布不同。阈值按本次后端显式传入，避免修改全局环境。
+    const { clusters, uncovered } = clusterResults(
+      ordered,
+      query,
+      semanticClusterOptions({ vectors, qVec, backend }),
+    );
     console.log(`🔍 ${label} 搜索 "${query}" → ${r.results.length} 条(过滤后 ${kept.length} · 聚类 ${clusters.length} 组)`);
     if (backend === "api") console.log(`🧠 语义后端: API(${em?.model || ""})`);
     if (ads.length > 0) {
@@ -79,7 +96,7 @@ export async function printResults(r, query, flat = false, semantic = null) {
     // 搜索完成后可 websearch.mjs reveal(或直接读文件)展开查看。URL 永不丢。
     // conservative 模式:只排序不折叠,全量展开;无嵌入时全部走原逻辑(零回归)。
     const { shown, collapsed } = buildPresentation(clusters);
-    rep.learnCollapsed(collapsed); // 低相关折叠簇 → 轻负反馈(该域结果与查询无关)
+    // 折叠是本次查询的相关性判断,不是站点内容质量证据,不得写入全局域名信誉。
     for (const c of shown) {
       const parts = [`📦 [${c.label}] 相关度 ${c.score.toFixed(2)} · ${c.size} 条`];
       if (c.semScore !== null && c.semScore !== undefined) parts.push(`语义 ${c.semScore.toFixed(2)}`);
@@ -91,6 +108,10 @@ export async function printResults(r, query, flat = false, semantic = null) {
       if (c.duplicates > 0) parts.push(`含 ${c.duplicates} 条近似重复`);
       console.log(parts.join(" · "));
       if (c.variants && c.variants.length > 0 && c.size > 1) console.log(`   ↳ 簇内主题: ${[...new Set(c.variants)].join(" / ")}`);
+      for (const duplicate of c.duplicateItems || []) {
+        console.log(`   ↳ 近似重复: ${stripControl(duplicate.title || "(无标题)")}`);
+        if (duplicate.url) console.log(`      🔗 ${duplicate.url}`);
+      }
       c.items.forEach((x) => {
         const badge = x.flags && x.flags.length > 0 ? ` ⚠[${x.flags.join(",")}]` : "";
         const repBadge_ = x.rep?.badge ? ` ${x.rep.badge}` : "";
