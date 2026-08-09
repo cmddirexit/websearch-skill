@@ -1,0 +1,197 @@
+{
+  "_docs": "引擎注册表(声明式)。扩展新引擎三步:1) engines/ 下实现 search 函数;2) registry.mjs 的 ENGINE_IMPLS/ENGINE_LABELS 注册;3) 在此文件登记 + 声明降级链。search 与 fallbacks 的值必须是 registry.mjs 中注册的 key。aggregateWith: 声明多引擎聚合伙伴(limit>10 时并行抓取去重合并;未声明则不参与聚合,如 cnnews 本身已是大批量新闻源)。zhOnly/enOnly: 引擎适用的查询语言(聚合时按查询语言自动跳过不适用引擎,如英文查询跳过百度避免中文污染)。host: 聚合前 TCP 连通性预检的探测域名(必须与实际请求域名一致;留空=不预检)。",
+  "engines": {
+    "bing": {
+      "label": "bing(中文/英文通用)",
+      "search": "bing",
+      "fallbacks": [
+        "marginalia",
+        "marginalia-browser",
+        "bing-browser"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "pageLimit": 10,
+      "host": "cn.bing.com"
+    },
+    "baidu": {
+      "label": "baidu(中文)",
+      "search": "baidu",
+      "fallbacks": [
+        "bing",
+        "bing-browser"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "www.baidu.com"
+    },
+    "sogou": {
+      "label": "sogou(中文)",
+      "search": "sogou",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "www.sogou.com"
+    },
+    "so360": {
+      "label": "so360(360搜索·中文)",
+      "search": "so360",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "www.so.com"
+    },
+    "marginalia": {
+      "label": "marginalia(英文独立索引)",
+      "search": "marginalia",
+      "fallbacks": [
+        "marginalia-browser"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "enOnly": true,
+      "pageLimit": 10,
+      "host": "search.marginalia.nu"
+    },
+    "cnnews": {
+      "label": "cnnews(官方新闻源·带日期)",
+      "search": "cnnews",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "aggregateWith": [
+        "bing",
+        "baidu",
+        "github"
+      ],
+      "pageLimit": 400,
+      "host": ""
+    },
+    "hn": {
+      "label": "hn(Hacker News 技术讨论)",
+      "search": "hn",
+      "fallbacks": [
+        "marginalia",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "enOnly": true,
+      "pageLimit": 50,
+      "host": "hn.algolia.com"
+    },
+    "github": {
+      "label": "github(代码仓库)",
+      "search": "github",
+      "fallbacks": [
+        "bing",
+        "marginalia"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "pageLimit": 50,
+      "host": "api.github.com"
+    },
+    "wikipedia": {
+      "label": "wikipedia(英文百科)",
+      "search": "wikipedia",
+      "fallbacks": [
+        "marginalia",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "enOnly": true,
+      "pageLimit": 50,
+      "host": "en.wikipedia.org"
+    },
+    "searx": {
+      "label": "searx(SearXNG 聚合,含 Google)",
+      "search": "searx",
+      "fallbacks": [
+        "bing",
+        "marginalia",
+        "bing-browser"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "pageLimit": 30,
+      "host": ""
+    },
+    "sm": {
+      "label": "sm(神马搜索·中文)",
+      "search": "sm",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "m.sm.cn"
+    },
+    "toutiao": {
+      "label": "toutiao(头条搜索·中文)",
+      "search": "toutiao",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "so.toutiao.com"
+    },
+    "chinaso": {
+      "label": "chinaso(中国搜索·官方 JSON API)",
+      "search": "chinaso",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "www.chinaso.com"
+    },
+    "sogou-wechat": {
+      "label": "sogou-wechat(微信公众号文章)",
+      "search": "sogou-wechat",
+      "fallbacks": [
+        "baidu",
+        "bing"
+      ],
+      "aggregateWith": [
+        "all"
+      ],
+      "zhOnly": true,
+      "pageLimit": 10,
+      "host": "weixin.sogou.com"
+    }
+  }
+}

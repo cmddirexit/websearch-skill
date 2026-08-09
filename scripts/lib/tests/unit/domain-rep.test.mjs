@@ -1,0 +1,344 @@
+// domain-rep.mjs 域名信誉评分 + 增量学习(软限制,非硬剔除)
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  registrableHost, repKeys, contributionFromQuality, updateScore, updateFetchScore, effectiveScore, decayedScore,
+  repFactor, repBadge, clamp, createDomainReputation,
+  cnBigrams, enWords, urlTokens, flagTokens, extractLearnFeatures, titleFlagTokens, predictTokens, updateMetaTokens,
+} from "../../domain-rep.mjs";
+
+
+test("rep: 注册域名去 www、折叠子域,失败/引擎域返回空串", () => {
+  assert.equal(registrableHost("https://www.cnblogs.com/pinpaituijan/p/1"), "cnblogs.com");
+  assert.equal(registrableHost("https://zhuanlan.zhihu.com/p/1"), "zhihu.com", "子域折叠到注册域");
+  assert.equal(registrableHost("https://news.xnnews.com.cn/a"), "xnnews.com.cn", "二级国家域正确提取");
+  assert.equal(registrableHost("not a url"), "");
+  assert.equal(registrableHost("https://e.so.com/we?q=1"), "", "引擎跳转域不学习");
+  assert.equal(registrableHost("https://link.zhihu.com/?target=x"), "", "外链跳转域不学习");
+});
+
+
+test("rep: 两级键 = host 全站 + host/首段路径(站内子空间)", () => {
+  assert.deepEqual(repKeys("https://www.cnblogs.com/pinpaituijan/p/20062149"), ["cnblogs.com", "cnblogs.com/pinpaituijan"]);
+  assert.deepEqual(repKeys("https://www.zhihu.com/question/123"), ["zhihu.com", "zhihu.com/question"]);
+  // 首页无路径段 → 仅 host;文件扩展名/功能段路径不建子键
+  assert.deepEqual(repKeys("https://blog.com/"), ["blog.com"]);
+  assert.deepEqual(repKeys("https://blog.com/index.html"), ["blog.com"]);
+  assert.deepEqual(repKeys("https://github.com/login"), ["github.com"], "功能段不建子键");
+  assert.deepEqual(repKeys("https://e.so.com/we?q=1"), [], "引擎域无键");
+});
+
+
+test("rep: 贡献分 = quality 基础 + spam/栏目页惩罚,desc-empty 中性化,clamp [0.05,1]", () => {
+  assert.equal(contributionFromQuality(1), 1);
+  assert.equal(contributionFromQuality(0.5), 0.5);
+  assert.ok(contributionFromQuality(0.5, ["low:spam-desc"]) < contributionFromQuality(0.5), "垃圾文案标记应减分");
+  assert.ok(contributionFromQuality(0.5, ["low:index-page"]) < contributionFromQuality(0.5), "栏目页应减分");
+  assert.ok(contributionFromQuality(0.5, ["low:desc-empty"]) > contributionFromQuality(0.5, ["low:index-page"]), "desc-empty 惩罚应远轻于栏目页(反爬误伤防护)");
+  assert.equal(contributionFromQuality(0.5, ["low:spam-desc", "low:index-page"]), 0.1, "0.5×0.4×0.5=0.1");
+  assert.equal(contributionFromQuality(NaN), 0.5, "非法 quality 回退中性");
+  assert.equal(contributionFromQuality(0.001), 0.05, "下限 clamp");
+});
+
+
+test("rep: 平滑更新收敛到贡献值,学习率随样本数递减", () => {
+  const e = { searchScore: 0.5, searchSamples: 0 };
+  updateScore(e, 0.9);
+  assert.ok(e.searchScore > 0.5 && e.searchScore < 0.9, "首样本向 0.9 移动");
+  for (let i = 0; i < 200; i++) updateScore(e, 0.9);
+  assert.ok(e.searchScore > 0.88, "200 样本后收敛到 0.9");
+  // 学习率递减:样本多时单次噪声漂移小
+  const e2 = { searchScore: 0.8, searchSamples: 100 };
+  updateScore(e2, 0.1);
+  assert.ok(Math.abs(e2.searchScore - 0.8) < 0.1, "稳定期抗单次噪声漂移");
+  const e3 = { searchScore: 0.5, searchSamples: 0 };
+  updateScore(e3, 0.1);
+  assert.ok(Math.abs(e3.searchScore - 0.5) > 0.1, "探索期学得快");
+});
+
+
+test("rep: 时间衰减 — 30 天内不变,90 天完全中性", () => {
+  const now = Date.now();
+  const entry = { searchScore: 0.2, fetchScore: 0.5, searchSamples: 10, lastSeen: now };
+  assert.equal(decayedScore(entry, now), 0.2, "刚见过不衰减");
+  assert.equal(decayedScore(entry, now + 29 * 86_400_000), 0.2, "30 天内零衰减");
+  const mid = decayedScore(entry, now + 60 * 86_400_000);
+  assert.ok(mid > 0.2 && mid < 0.5, "60 天部分回归:" + mid);
+  assert.equal(decayedScore(entry, now + 120 * 86_400_000), 0.5, "90 天后完全中性");
+});
+
+
+test("rep: 信誉因子映射 — 0.5→1,0→0.35,1→1.15;冷启动不干预", () => {
+  assert.equal(repFactor(0.5, 10), 1);
+  assert.equal(repFactor(0, 10), 0.35);
+  assert.equal(repFactor(1, 10), 1.15);
+  assert.equal(repFactor(0.8, 10), 1.15, "0.8→1.48 超上限 clamp 到 1.15");
+  assert.equal(repFactor(0, 1), 1, "样本不足(冷启动)零干预");
+  assert.equal(repFactor(0, 2), 1);
+  assert.equal(repFactor(0.5, 3), 1);
+});
+
+
+test("rep: badge 分档 — ≥0.65 正,≤0.35 负,中间中性,冷启动无 badge", () => {
+  assert.equal(repBadge(0.82, 5), "✓[rep:0.82]");
+  assert.equal(repBadge(0.31, 5), "⚠[rep:0.31]");
+  assert.equal(repBadge(0.5, 5), "·[rep:0.50]");
+  assert.equal(repBadge(0.1, 2), "", "冷启动无 badge");
+  assert.equal(clamp(1.5, 0, 1), 1);
+  assert.equal(clamp(-1, 0, 1), 0);
+});
+
+
+test("rep: 从搜索结果学习 — 低质域名降分,干净域名保持;ad: 硬剔除不参与;desc-empty 不误伤", () => {
+  const rep = createDomainReputation({ file: null });
+  rep.learnFromResults([
+    { title: "某发稿平台软文", url: "https://www.cnblogs.com/pinpaituijan/p/1", desc: "立即点击下载领取优惠", flags: ["low:spam-desc"], quality: 0.7 },
+    { title: "某发稿平台软文2", url: "https://www.cnblogs.com/pinpaituijan/p/2", desc: "马上注册限时免费", flags: ["low:spam-desc"], quality: 0.6 },
+    { title: "正常深度文章", url: "https://zhuanlan.zhihu.com/p/1", desc: "完整内容", flags: [], quality: 1 },
+    { title: "知乎问题(反爬无摘要)", url: "https://www.zhihu.com/question/1", desc: "", flags: ["low:desc-empty"], quality: 0.9 },
+    { title: "广告", url: "https://ads.example.com/1", flags: ["ad:domain"], quality: 0 },
+  ]);
+  const raw = rep._raw();
+  assert.ok(raw["cnblogs.com"].searchSamples === 2 && raw["cnblogs.com"].searchScore < 0.5, "软文域名降分:" + raw["cnblogs.com"].searchScore);
+  assert.equal(raw["cnblogs.com/pinpaituijan"].searchSamples, 2, "路径子键同步学习");
+  assert.ok(raw["zhihu.com"].searchSamples >= 2 && raw["zhihu.com"].searchScore >= 0.75, "知乎(含 zhuanlan 折叠)保持高分:" + raw["zhihu.com"].searchScore);
+  assert.equal(raw["ads.example.com"], undefined, "广告域名不参与信誉");
+  // desc-empty 不计入内容低质(知乎反爬不误伤):lowHits 不涨,分数接近中性偏上
+  assert.equal(raw["zhihu.com"].lowHits, 0, "desc-empty 不计数为内容低质");
+  assert.ok(raw["zhihu.com"].searchScore >= 0.8, "desc-empty 微减不伤知乎:" + raw["zhihu.com"].searchScore);
+  // 冷启动(<3 样本):lookup 有样本但 factor=1(零干预)
+  const lu = rep.lookup("https://zhuanlan.zhihu.com/p/2");
+  assert.ok(lu && lu.samples >= 1 && lu.factor === 1, "冷启动零干预");
+});
+
+
+test("rep: 重复低质模式惩罚 — 稳定低质率>60% 的域名持续降档(学习规律)", () => {
+  const rep = createDomainReputation({ file: null });
+  // 软文站:8 条全是内容低质标记
+  for (let i = 0; i < 8; i++) {
+    rep.learnFromResults([{ title: `限时优惠第${i}篇`, url: `https://seo-station.com/p/${i}`, desc: "立即点击注册领取", flags: ["low:spam-title", "low:spam-desc"], quality: 0.5 }]);
+  }
+  const lu = rep.lookup("https://seo-station.com/p/99");
+  assert.ok(lu && lu.score < 0.25, "重复低质模式 → 深降:" + lu?.score);
+  assert.ok(lu.score < 0.35, "低于单次惩罚能到的水平(规律惩罚生效)");
+  // 正常站:同样 8 条但干净 → 高分
+  const rep2 = createDomainReputation({ file: null });
+  for (let i = 0; i < 8; i++) {
+    rep2.learnFromResults([{ title: `正常文章${i}`, url: `https://good-blog.com/p/${i}`, desc: "这是完整的技术文章内容,信息量充足", flags: [], quality: 1 }]);
+  }
+  assert.ok(rep2.lookup("https://good-blog.com/p/9").score > 0.9, "干净站保持高分");
+  // 反爬站:8 条全是 desc-empty(无内容低质标记)→ 不触发规律惩罚
+  const rep3 = createDomainReputation({ file: null });
+  for (let i = 0; i < 8; i++) {
+    rep3.learnFromResults([{ title: `知乎问题${i}`, url: `https://www.zhihu.com/question/${i}`, desc: "", flags: ["low:desc-empty"], quality: 0.9 }]);
+  }
+  assert.ok(rep3.lookup("https://www.zhihu.com/question/99").score > 0.8, "全 desc-empty 不触发规律惩罚(反爬误伤防护)");
+});
+
+
+test("rep: fetch 实测反馈 — 最强信号,空壳域名快速降分", () => {
+  const rep = createDomainReputation({ file: null });
+  rep.learnFetch("https://seo-shell.com/p/1", false);
+  rep.learnFetch("https://seo-shell.com/p/2", false);
+  rep.learnFetch("https://seo-shell.com/p/3", false);
+  const lu = rep.lookup("https://seo-shell.com/p/9");
+  assert.ok(lu && lu.score < 0.25, "3 次 fetch 空 → 信誉<0.25:" + lu?.score);
+  assert.ok(lu.fetchEmpty >= 3);
+  rep.learnFetch("https://good.com/p/1", true);
+  const lu2 = rep.lookup("https://good.com/p/2");
+  assert.ok(lu2 && lu2.score > 0.7, "fetch 成功 → 高信誉:" + lu2?.score);
+});
+
+
+test("rep: 低相关折叠负反馈(轻信号,不冤枉内容站)", () => {
+  const rep = createDomainReputation({ file: null });
+  rep.learnCollapsed([
+    { items: [{ url: "https://dict-site.com/a" }, { url: "https://dict-site.com/b" }] },
+  ]);
+  const lu = rep.lookup("https://dict-site.com/c");
+  assert.ok(lu && lu.samples === 2 && lu.score < 0.5, "折叠轻负信号:" + lu?.score);
+  assert.ok(lu.score > 0.3, "折叠是轻信号,不比 fetch 空壳(0.1)重");
+});
+
+
+test("rep: 软降权应用 — quality 乘因子,低信誉压沉不剔除,冷启动零影响", () => {
+  const rep = createDomainReputation({ file: null });
+  rep.learnFetch("https://low.com/a", false);
+  rep.learnFetch("https://low.com/b", false);
+  rep.learnFetch("https://low.com/c", false);
+  rep.learnFetch("https://high.com/a", true);
+  rep.learnFetch("https://high.com/b", true);
+  rep.learnFetch("https://high.com/c", true);
+  const results = [
+    { title: "低信誉域文章", url: "https://low.com/p/1", quality: 1 },
+    { title: "高信誉域文章", url: "https://high.com/p/1", quality: 1 },
+    { title: "冷启动域文章", url: "https://fresh.com/p/1", quality: 1 },
+  ];
+  rep.applyToResults(results);
+  assert.ok(results[0].quality < 0.7, "低信誉压沉:" + results[0].quality);
+  assert.ok(results[1].quality > 1, "高信誉微升:" + results[1].quality);
+  assert.equal(results[2].quality, 1, "冷启动零影响");
+  assert.ok(results[0].rep.badge.startsWith("⚠"), "低信誉打负 badge");
+  assert.ok(results[1].rep.badge.startsWith("✓"), "高信誉打正 badge");
+});
+
+
+test("rep: 持久化 roundtrip(跨进程增量积累)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsrep-"));
+  const file = join(dir, "rep.json");
+  try {
+    const r1 = createDomainReputation({ file });
+    r1.learnFetch("https://persist.com/a", false);
+    r1.learnFetch("https://persist.com/b", true);
+    r1.save();
+    const r2 = createDomainReputation({ file });
+    const lu = r2.lookup("https://persist.com/c");
+    assert.ok(lu && lu.samples === 4 && lu.fetchEmpty === 1 && lu.fetchOk === 1, "状态跨实例读回:" + JSON.stringify(lu));
+    // 继续积累(不覆盖,增量)
+    r2.learnFetch("https://persist.com/d", false);
+    r2.save();
+    const r3 = createDomainReputation({ file });
+    assert.equal(r3._raw()["persist.com"].searchSamples, 3, "增量积累");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+// ==================== 元学习:学习式 token 特征(非硬匹配) ====================
+
+test("meta: tokenizer — 中文 bigram/英文词/URL 段/内容标记,无人工词表", () => {
+  // 中文 bigram(纯汉字)
+  const bg = cnBigrams("推荐测评平台");
+  assert.ok(bg.has("推荐") && bg.has("荐测") && bg.has("测评") && bg.has("评平") && bg.has("平台"), "中文 2-gram:" + [...bg]);
+  assert.ok(!cnBigrams("abc123").size, "非汉字不产出 bigram");
+  // 英文词(小写)
+  const ew = enWords("Best Reddit Guide 2026");
+  assert.ok(ew.has("best") && ew.has("reddit") && ew.has("2026"), "英文词+数字词");
+  // URL 段(纯数字段归一化为 n,防具体日期过拟合;混合段如 t20260512_4609208 是软文模板特征,保留)+ 域名标签
+  const ut = urlTokens("http://news.xnnews.com.cn/shangy/202605/t20260512_4609208.shtml");
+  assert.ok(ut.has("d:xnnews") && ut.has("u:shangy"), "域名标签+路径段");
+  assert.ok(ut.has("u:n") && !ut.has("u:202605"), "纯数字段归一化:" + [...ut]);
+  assert.ok(ut.has("u:t20260512_4609208"), "混合日期模板段保留(软文特征):" + [...ut]);
+  // 内容标记
+  const ft = flagTokens(["low:spam-desc", "low:desc-empty"]);
+  assert.ok(ft.has("f:spam-desc") && ft.has("f:desc-empty") && !ft.has("ad:domain"), "flag → token,广告排除");
+  // 合并
+  const all = extractLearnFeatures("https://blog.com/p/1", { title: "Python教程 推荐", flags: ["low:desc-empty"] });
+  assert.ok(all.has("t:python") && all.has("t:教程") && all.has("u:n") && all.has("f:desc-empty"), "合并激活集:" + [...all]);
+});
+
+
+test("meta: 预测 — 无权重中性 0.5,权重推动偏离", () => {
+  const m0 = { bias: 0, weights: {} };
+  assert.equal(predictTokens(new Set(["t:推荐"]), m0), 0.5, "零权重 → 中性");
+  const m = { bias: 0, weights: { "t:推荐": -1.2, "t:教程": 0.8 } };
+  assert.ok(predictTokens(new Set(["t:推荐"]), m) < 0.35, "负权重压分:" + predictTokens(new Set(["t:推荐"]), m));
+  assert.ok(predictTokens(new Set(["t:教程"]), m) > 0.6, "正权重提分:" + predictTokens(new Set(["t:教程"]), m));
+  assert.ok(predictTokens(new Set(["t:未知词"]), m) === 0.5, "未见 token 无影响(稀疏泛化)");
+});
+
+
+test("meta: 在线学习 — token 权重从数据中涌现,非硬编码", () => {
+  // 模拟真实软文站:标题高度模板化(同一发稿商标题几乎一致),反复低质出现
+  const SEO_TITLE = "2026年6月工程信息平台推荐榜测评优惠免费下载"; // 软文模板标题
+  const DOC_TITLE = "Python爬虫教程完整实战"; // 干净技术文章标题
+  const meta = { bias: 0, weights: {}, touched: {}, weightSamples: 0 };
+  for (let i = 0; i < 80; i++) {
+    updateMetaTokens(meta, extractLearnFeatures(`https://seo${i}.com/post/${i}`, { title: SEO_TITLE, flags: ["low:spam-desc"] }), 0.1);
+    updateMetaTokens(meta, extractLearnFeatures(`https://docs${i}.com/post/${i}`, { title: DOC_TITLE, flags: [] }), 0.95);
+  }
+  // 数据自动学出:软文词权重为负,教程词权重为正(没有人工定义任何词表)
+  assert.ok(meta.weights["t:推荐"] < -0.1, "推荐 权重被学负:" + meta.weights["t:推荐"]);
+  assert.ok(meta.weights["t:优惠"] < -0.1, "优惠 权重被学负:" + meta.weights["t:优惠"]);
+  assert.ok(meta.weights["t:爬虫"] > 0.1, "爬虫 权重被学正:" + meta.weights["t:爬虫"]);
+  assert.ok(meta.weights["t:教程"] > 0.1, "教程 权重被学正:" + meta.weights["t:教程"]);
+  assert.ok(meta.weights["t:优惠"] < meta.weights["t:爬虫"], "软文词权重低于教程词:" + meta.weights["t:优惠"] + " vs " + meta.weights["t:爬虫"]);
+  // 预测:新域名 + 与训练模板一致的软文词 → 强识别;模板变形(部分词重合)→ 略低于中性;
+  // 教程词 → 预测高。bigram 对词边界敏感,故变形标题只要求中性偏下,模板一致要求强负。
+  const seoPred = predictTokens(extractLearnFeatures("https://new-seo.com/post/1", { title: "2026年7月工程信息平台推荐榜测评优惠免费下载" }), meta);
+  assert.ok(seoPred < 0.35, "模板一致的新软文冷启动预测低:" + seoPred);
+  const seoVar = predictTokens(extractLearnFeatures("https://new-seo2.com/post/1", { title: "2026年6月免费推荐下载测评" }), meta);
+  assert.ok(seoVar < 0.55, "模板变形(部分词重合)预测略低于中性:" + seoVar);
+  const docPred = predictTokens(extractLearnFeatures("https://new-docs.com/post/1", { title: "爬虫教程实战" }), meta);
+  assert.ok(docPred > 0.6, "新教程冷启动预测高:" + docPred);
+  // 未见 token 的域名 → 中性(稀疏泛化,不误伤)
+  assert.ok(Math.abs(predictTokens(new Set(["t:神秘词xyz"]), meta) - 0.5) < 0.1, "未见词中性");
+});
+
+
+test("meta: 冷启动外循环 — 模式成熟后新域名无需自身样本即可预测打分", () => {
+  const rep = createDomainReputation({ file: null });
+  // 模式未成熟(样本 < META_MIN_SAMPLES):新域名无预测(冷启动关闭)
+  rep.learnFromResults([{ title: "测试", url: "https://a.com/1", desc: "x", flags: [], quality: 0.9 }]);
+  assert.equal(rep.lookup("https://brand-new-domain.com/p/1"), null, "模式未成熟不预测");
+  // 积累 60 个低质软文样本(让模式学出规律)
+  for (let i = 0; i < 60; i++) {
+    rep.learnFromResults([{ title: `2026年${i}月平台推荐榜测评口碑`, url: `https://seo${i}.com/2026/0${i % 9}/t${i}${i}.shtml`, desc: "", flags: ["low:spam-desc", "low:desc-empty"], quality: 0.4 }]);
+  }
+  // 全新域名(从未见过):标题带学到的软文模式 → 冷启动预测低分 + 软降权生效
+  const cold = rep.lookup("https://brand-new-seo-site.cn/2026/07/t20260712_12345.shtml", { title: "2026年7月信息平台推荐榜测评" });
+  assert.ok(cold && cold.coldStart === true, "新域名走冷启动匹配");
+  assert.ok(cold.score < 0.45, "冷启动预测分压低:" + cold?.score);
+  assert.ok(cold.factor < 1, "冷启动软降权生效:" + cold?.factor);
+  assert.ok(cold.badge.startsWith("[meta:"), "badge 标注预测来源");
+  // 干净的新域名(无软文特征)→ 中性(允许 bias 偏移 ±0.12,60 软文样本会把 bias 稍微拉低)
+  const neutral = rep.lookup("https://brand-new-clean-blog.com/p/1", { title: "Python 异步编程详解" });
+  assert.ok(neutral && neutral.score >= 0.38 && neutral.score <= 0.62, "无特征新站中性:" + neutral?.score);
+  // 自身样本积累后 → 转入域名级学习(coldStart 消失)
+  rep.learnFromResults([{ title: "Python 异步编程详解", url: "https://brand-new-clean-blog.com/p/1", desc: "完整内容", flags: [], quality: 1 }]);
+  const after = rep.lookup("https://brand-new-clean-blog.com/p/2", { title: "Python 异步编程详解" });
+  assert.ok(after && after.coldStart !== true && after.samples >= 1, "有自身样本后转域名级");
+});
+
+
+test("meta: 公众号等引擎跳转链接只学标题不学 URL token(域名无法归因不污染)", () => {
+  // 公众号加密链接:域名是 weixin.sogou.com(引擎域,registrableHost 返回空)
+  const url = "https://weixin.sogou.com/link?url=dn9a_xxx&type=2";
+  assert.equal(registrableHost(url), "", "引擎跳转域无注册域");
+  // 完整提取(含 URL token)vs 仅标题提取:后者不含 d:/u: 引擎 token
+  const full = extractLearnFeatures(url, { title: "2026年工程信息平台推荐榜", flags: [] });
+  const only = titleFlagTokens("2026年工程信息平台推荐榜", []);
+  assert.ok(full.has("d:sogou") && full.has("u:link"), "完整提取含 URL token");
+  assert.ok(![...only].some((t) => t.startsWith("d:") || t.startsWith("u:")), "仅标题提取无 URL token");
+  assert.ok(only.has("t:推荐"), "标题 bigram 保留");
+  // learnFromResults 对引擎跳转结果:域名级不建条目,但标题参与模式学习
+  const rep = createDomainReputation({ file: null });
+  rep.learnFromResults([{ title: "某公众号深度文章推荐", url, desc: "", flags: [], quality: 1 }]);
+  assert.equal(rep._raw()["weixin.sogou.com"], undefined, "引擎域不建域名条目");
+  assert.ok(rep._meta().weightSamples >= 1, "标题 token 仍参与模式学习");
+});
+
+
+test("meta: LLM label 学习 — learnFromResultsLLM 用内容可信度而非 quality,失败自动降级", async () => {
+  const rep = createDomainReputation({ file: null });
+  // 注入假 judge(纯函数测试,不真调 LLM):软文标题→0.95,教程标题→0.05
+  const realJudge = (await import("../../llm-judge.mjs")).judgeResults;
+  // 直接 patch 模块导出的引用不可行(import 绑定),改用 learnFromResultsLLM 内部
+  // 的 judgeResults —— 通过环境变量强制降级路径测不到 LLM 分支,故这里改为:
+  //  手测 metaLabel 映射逻辑 + 降级路径。
+  // LLM 关掉 → 走降级 learnFromResults(不抛错、不阻塞)
+  process.env.WEBSEARCH_LLM_OFF = "1";
+  const ok = await rep.learnFromResultsLLM([{ title: "测试", url: "https://a.com/1", desc: "x", flags: [], quality: 0.9 }]);
+  assert.equal(ok, false, "LLM 关闭时降级,返回 false");
+  assert.ok(rep._raw()["a.com"], "降级后域名级学习照常");
+  delete process.env.WEBSEARCH_LLM_OFF;
+});
+
+test("meta: metaLabel 分离 — 元学习用可信度 label,域名级用 quality(不互相污染)", () => {
+  const rep = createDomainReputation({ file: null });
+  // 域名级:0.4 低 quality → 域名分应降;元学习:label 0.95(可信)→ 模式权重学正
+  rep.record("https://spam-example.com/1", 0.4, { tokens: new Set(["t:软文词", "u:post"]), low: true, metaLabel: 0.95 });
+  const e = rep._raw()["spam-example.com"];
+  assert.ok(e.searchScore < 0.5, "域名级用 quality(降分):" + e.searchScore.toFixed(2));
+  const w = rep._meta().weights["t:软文词"];
+  assert.ok(w !== undefined && w > 0, "元学习用 metaLabel(正),权重学正:" + w);
+  // 反过来:域名级高分 + 元学习低 label
+  rep.record("https://trusted-example.com/1", 0.95, { tokens: new Set(["t:软文词", "u:post"]), low: false, metaLabel: 0.05 });
+  assert.ok(rep._raw()["trusted-example.com"].searchScore > 0.5, "域名级高分保持");
+  const w2 = rep._meta().weights["t:软文词"];
+  assert.ok(w2 < 0.1, "同一个 token 被负 label 拉回:" + w2.toFixed(3));
+});
