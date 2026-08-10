@@ -220,7 +220,11 @@ export async function embedTexts(texts, { quiet = false } = {}) {
  * MRL 维度压缩(EMBED_API_DIMENSIONS)不被支持的提供商(400/422)自动去掉重试。
  * @returns {Promise<number[][]|null>}
  */
-export async function apiEmbedTexts(texts, { quiet = false } = {}) {
+export async function apiEmbedTexts(texts, {
+  quiet = false,
+  timeoutMs = 10_000,
+  maxAttempts = 3,
+} = {}) {
   const key = getApiKey();
   if (!key) {
     if (!quiet) console.error("[degrade] 未配置 SILICONFLOW_API_KEY(环境变量或 .env.json),跳过 API 嵌入");
@@ -233,15 +237,19 @@ export async function apiEmbedTexts(texts, { quiet = false } = {}) {
   const model = EMBED_API_MODEL;
   const dim = EMBED_API_DIMENSIONS;
   let body = { model, input: texts, encoding_format: "float" };
-  if (dim > 0) body.dimensions = dim;
+  let usesDimensions = dim > 0;
+  if (usesDimensions) body.dimensions = dim;
+  const attemptLimit = Math.max(1, Math.min(5, Math.trunc(maxAttempts) || 1));
+  const requestTimeoutMs = Math.max(250, Math.min(120_000, Number(timeoutMs) || 10_000));
   let attempts = 0;
-  while (attempts < 3) {
+  while (attempts < attemptLimit) {
     attempts++;
     try {
       const res = await fetch(`${EMBED_API_BASE}/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(requestTimeoutMs),
       });
       if (res.ok) {
         const j = await res.json();
@@ -254,13 +262,15 @@ export async function apiEmbedTexts(texts, { quiet = false } = {}) {
         return out;
       }
       // MRL 维度压缩不被支持(换 OpenAI 兼容提供商)→ 去掉 dimensions 重试
-      if (dim > 0 && (res.status === 400 || res.status === 422)) {
+      if (usesDimensions && (res.status === 400 || res.status === 422)) {
+        usesDimensions = false;
         body = { model, input: texts, encoding_format: "float" };
+        attempts--; // 协议兼容纠正不消耗网络重试额度,且只会发生一次
         continue;
       }
       const err = await res.text().catch(() => "");
       const retryable = res.status === 429 || res.status >= 500;
-      if (retryable && attempts < 3) {
+      if (retryable && attempts < attemptLimit) {
         await new Promise((r) => setTimeout(r, 300 * attempts)); // 退避 300/600ms
         continue;
       }
@@ -271,8 +281,8 @@ export async function apiEmbedTexts(texts, { quiet = false } = {}) {
       const retryable =
         msg.startsWith("HTTP 429") || msg.startsWith("HTTP 5") ||
         msg.includes("fetch failed") || msg.includes("ECONN") || msg.includes("ETIMEDOUT") ||
-        msg.includes("network");
-      if (retryable && attempts < 3) {
+        msg.includes("network") || e?.name === "AbortError" || e?.name === "TimeoutError";
+      if (retryable && attempts < attemptLimit) {
         await new Promise((r) => setTimeout(r, 300 * attempts));
         continue;
       }
@@ -283,6 +293,33 @@ export async function apiEmbedTexts(texts, { quiet = false } = {}) {
   }
   apiCooldown.mark(API_KEY, false);
   return null;
+}
+
+/**
+ * 任意文本按显式语义后端配置生成向量。与 embedResults 共用 off/api/local/wasm/auto
+ * 契约，避免调用方绕过隐私配置；auto 才允许 API 失败后回退本地模型。
+ */
+export async function embedConfiguredTexts(texts, {
+  quiet = false,
+  apiTimeoutMs = 10_000,
+  apiMaxAttempts = 3,
+} = {}) {
+  if (!Array.isArray(texts) || texts.length === 0) return null;
+  const configuredBackend = currentEmbedBackend();
+  const forced = configuredBackend === "auto" ? undefined : configuredBackend;
+  if (forced === "off") return null;
+  if (forced === "api") {
+    return apiEmbedTexts(texts, { quiet, timeoutMs: apiTimeoutMs, maxAttempts: apiMaxAttempts });
+  }
+  if (forced === "local" || forced === "wasm") {
+    return embedTexts(texts, { quiet });
+  }
+  const apiVectors = await apiEmbedTexts(texts, {
+    quiet: true,
+    timeoutMs: apiTimeoutMs,
+    maxAttempts: apiMaxAttempts,
+  });
+  return apiVectors || embedTexts(texts, { quiet });
 }
 
 /**

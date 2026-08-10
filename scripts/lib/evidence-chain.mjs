@@ -2,8 +2,8 @@
  * evidence-chain.mjs — 内容证据链裁决(零词表,可注入测试)
  *
  * 把 learnFetchContent 里的证据链裁决抽离出来:结构证据(纯规则) →
- * 语义证据(标题-正文嵌入一致性) → 贝叶斯(历史标注自举)。三者返回统一契约
- * {label, confidence, source, reasons},任一命中即止;全部模棱两可 → null(中性)。
+ * 语义证据(标题-正文嵌入一致性) → 贝叶斯(历史标注自举)。结构负证据立即
+ * 返回；结构正证据先接受语义反证，防标题关键词填充绕过；全部模棱两可 → null。
  *
  * 设计:
  *   - 纯编排,不持有任何状态;bayes/embedFn 依赖注入,便于单元测试隔离
@@ -18,7 +18,7 @@ import { assessSemanticEvidence } from "./semantic-evidence.mjs";
 import { bodyTokens } from "./content-bayes.mjs";
 
 /**
- * 裁决一条正文的证据:结构 → 语义 → 贝叶斯,命中即返回。
+ * 裁决一条正文的证据:结构负证据 → 语义反证 → 结构正证据 → 贝叶斯。
  * @param {{title?:string, body?:string, markdown?:string}} extra
  * @param {{bayes?:Object, embedFn?:Function}} [opts]
  *   bayes: 内容贝叶斯实例(可选,未成熟时 predictEvidence 返回 null);
@@ -26,15 +26,18 @@ import { bodyTokens } from "./content-bayes.mjs";
  * @returns {Promise<{label:number, confidence:number, source:string, reasons:string[]}|null>}
  */
 export async function resolveContentEvidence(extra = {}, { bayes = null, embedFn } = {}) {
-  // 1. 结构证据(同步,纯规则:重复行/营销词/标题覆盖/句长均匀性)
+  // 1. 高精度结构负证据可直接返回,无需外部嵌入。
   const structural = assessContentEvidence(extra);
-  if (structural) return structural;
+  if (structural && structural.label < 0.5) return structural;
 
-  // 2. 语义证据(异步:标题-正文嵌入余弦;嵌入不可用返回 null,静默降级)
+  // 2. 结构正证据仍需接受语义反证,防正文填充标题词后绕过一致性检测。
   const semantic = await assessSemanticEvidence(extra, embedFn ? { embedFn } : {});
   if (semantic) return semantic;
 
-  // 3. 贝叶斯兜底(自举分类器;未成熟返回 null)
+  // 3. 无语义反证时确认结构正证据。
+  if (structural) return structural;
+
+  // 4. 贝叶斯兜底(自举分类器;未成熟返回 null)
   if (bayes) {
     const predicted = bayes.predictEvidence(bodyTokens(extra.body || extra.markdown));
     if (predicted) return predicted;

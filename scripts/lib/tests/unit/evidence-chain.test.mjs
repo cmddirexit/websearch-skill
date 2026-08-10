@@ -33,6 +33,28 @@ test("chain: 结构 null 时语义证据命中(标题党,注入假嵌入低相�
   assert.equal(ev.reasons[0], "title-body-semantic-mismatch");
 });
 
+test("chain: 结构正证据不能短路语义反证", async () => {
+  const keywordStuffed = {
+    title: "Python 异步编程教程",
+    markdown: ("Python 异步 编程 教程 " + "本文实际介绍旅游景点、天气、交通和住宿安排,与编程主题无关。").repeat(80),
+  };
+  const ev = await resolveContentEvidence(keywordStuffed, {
+    bayes: null,
+    embedFn: async () => [[1, 0], [0, 1]],
+  });
+  assert.equal(ev?.source, "semantic-v1", "标题关键词填充不得直接获得结构正标签");
+});
+
+test("chain: 高精度结构负证据立即返回,不调用嵌入", async () => {
+  let calls = 0;
+  const ev = await resolveContentEvidence(
+    { title: "某平台推荐", markdown: repeatedBody },
+    { bayes: null, embedFn: async () => { calls++; return [[1, 0], [0, 1]]; } },
+  );
+  assert.equal(ev?.reasons?.[0], "repeated-body");
+  assert.equal(calls, 0);
+});
+
 test("chain: 结构/语义都 null 时贝叶斯兜底(成熟模型)", async () => {
   const bayes = createContentBayes({ file: null });
   // 训练到成熟:低质(理财/推荐模板风)+ 优质(养花/绿植教程)

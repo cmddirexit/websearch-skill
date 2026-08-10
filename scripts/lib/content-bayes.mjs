@@ -31,13 +31,15 @@ import { cnBigrams, enWords } from "./rep-features.mjs";
 import { clamp } from "./rep-score.mjs";
 
 const BAYES_FILE = `${CACHE_DIR}/websearch-content-bayes.json`;
-const SCHEMA_VERSION = 1;
+// v2 修复正文英文词界与中文 60 字符截断;v1 token 语义不同,不能安全迁移。
+const SCHEMA_VERSION = 2;
 
-/** 正文 → token 集(中文 bigram + 英文词/数字)。截前 maxChars 字符,
- * bigram 覆盖正文主题词,英文词覆盖技术/品牌词;去空白压缩长度。 */
+/** 正文 → token 集(中文 bigram + 英文词/数字)。中文按压缩文本取 bigram,
+ * 英文必须保留原始空白词界;正文专用长度不能沿用标题的 60 字符上限。 */
 export function bodyTokens(text, maxChars = 1600) {
-  const t = String(text || "").replace(/\s+/g, "").slice(0, maxChars);
-  return new Set([...cnBigrams(t), ...enWords(t)]);
+  const limit = Math.max(0, Math.trunc(maxChars) || 0);
+  const raw = String(text || "").slice(0, limit);
+  return new Set([...cnBigrams(raw, limit), ...enWords(raw)]);
 }
 
 /**
@@ -72,7 +74,7 @@ export function createContentBayes({ file = BAYES_FILE } = {}) {
       if (!file) return;
       atomicWriteJsonSync(file, {
         version: SCHEMA_VERSION, updatedAt: Date.now(),
-        counts, samples, goodSamples, badSamples, eventIds: [...eventIds].slice(-5000),
+        counts, samples, goodSamples, badSamples, eventIds: [...eventIds],
       });
     } catch { /* 保存失败不影响主流程 */ }
   }

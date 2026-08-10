@@ -33,6 +33,23 @@ export const archiveCooldown = createCooldown({
   file: process.env.WEBSEARCH_ARCHIVE_FAIL_FILE || ARCHIVE_FAIL_FILE,
 });
 
+/** 只有网络、限流或服务端故障才说明 archive 基础设施不可用。 */
+export function isArchiveInfrastructureError(error) {
+  const status = Number(error?.status);
+  if (Number.isFinite(status) && status > 0) {
+    return status === 401 || status === 403 || status === 407 || status === 408
+      || status === 425 || status === 429 || status === 451 || status >= 500;
+  }
+  const message = String(error?.message || error || "").toLowerCase();
+  return /abort|timeout|timed out|fetch failed|network|econn|enet|ehost|enotfound|unreachable|socket|dns/.test(message);
+}
+
+/** URL 无快照/无正文不应触发全局冷却;必须所有镜像都属于基础设施故障。 */
+export function shouldCoolArchive(failures) {
+  return Array.isArray(failures) && failures.length > 0
+    && failures.every(isArchiveInfrastructureError);
+}
+
 /** 抓取调度:直连失败时尝试浏览器兜底。(导出供决策链单测;见 tests/unit/cli.test.mjs) */
 export async function runFetch(url, maxChars) {
   url = validateFetchUrl(url);
@@ -177,7 +194,7 @@ export async function runFetch(url, maxChars) {
         ar = await dbgStep("存档兜底(wayback+today)", () => fetchViaArchive(url, MAX_BODY_CHARS));
         if (ar) archiveCooldown.mark("archive", true);
       } catch (ae) {
-        archiveCooldown.mark("archive", false);
+        if (ae.archiveInfrastructureFailure) archiveCooldown.mark("archive", false);
         console.error(`[degrade] 存档兜底不可用(${ae.message})`);
         dbg(`存档兜底失败: ${String(ae.message).slice(0, 120)}`);
       }
@@ -268,6 +285,7 @@ async function fetchViaArchive(url, maxChars) {
   const { httpGetFull } = await import("./http.mjs");
   const { extractBodyFromHtml } = await import("./fetch-page.mjs");
   const errors = [];
+  const failures = [];
   const tryMirror = async (name, target, timeoutMs) => {
     const { contentType, finalUrl, body: html } = await httpGetFull(target, { timeoutMs });
     if (!contentType.includes("text/html")) throw new Error(`${name}: 内容类型 ${contentType}`);
@@ -281,6 +299,7 @@ async function fetchViaArchive(url, maxChars) {
     console.error(`[degrade] 存档 web.archive.org 命中`);
     return r;
   } catch (wa) {
+    failures.push(wa);
     errors.push(wa.message);
     console.error(`[degrade] 存档 web.archive.org 失败(${wa.message.slice(0, 50)})`);
   }
@@ -299,7 +318,10 @@ async function fetchViaArchive(url, maxChars) {
       console.error(`[degrade] 存档 ${s.value.url ? "archive.today 系" : ""} 命中`);
       return s.value;
     }
+    failures.push(s.reason);
     errors.push(s.reason?.message || "未知");
   }
-  throw new Error(`存档镜像全部失败: ${errors.join(" | ")}`);
+  const error = new Error(`存档镜像全部失败: ${errors.join(" | ")}`);
+  error.archiveInfrastructureFailure = shouldCoolArchive(failures);
+  throw error;
 }

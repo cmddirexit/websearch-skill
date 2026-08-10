@@ -65,7 +65,7 @@ export { assessSemanticEvidence, cosine as semanticCosine } from "./semantic-evi
 export { createContentBayes, contentBayes, bodyTokens } from "./content-bayes.mjs";
 export { resolveContentEvidence, trainBayes } from "./evidence-chain.mjs";
 export { judgeResults, llmConfig } from "./llm-judge.mjs";
-export { embedResults, embedTexts, getEmbedder, resetEmbedder } from "./embed.mjs";
+export { embedResults, embedTexts, embedConfiguredTexts, getEmbedder, resetEmbedder } from "./embed.mjs";
 export {
   computeRelThresholds,
   gradeCluster,

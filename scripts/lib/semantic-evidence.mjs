@@ -6,8 +6,8 @@
  * 标题党(夸大标题 + 不相关拼凑正文)语义错位 → 低相似度,无需任何人工词表。
  *
  * 设计(与内容证据同哲学:“可用即增强,不可用即降级”):
- *   - 复用 embed.mjs 的 API 嵌入(有 key 时,默认后端);本地 WASM 未装/无 key
- *     时返回 null(静默降级,不拖慢 fetch 主流程)。
+ *   - 严格服从 embed.mjs 的 off/api/local/wasm/auto 后端配置;auto 模式下 API
+ *     失败才回退本地模型,全部不可用时返回 null(静默降级)。
  *   - 只产负证据(标题党),不产正证据:高相似度交给现有结构证据
  *     (substantive-aligned-body)判断,避免语义判断过度扩张。
  *   - 依赖注入 embedFn,便于单元测试(真实网络调用不可靠,测试注入假嵌入)。
@@ -16,11 +16,16 @@
  * 标题党/泛泛标题 ≈ 0.2~0.45。取 <0.4 为错位(保守,宁漏勿误)。
  */
 
-import { apiEmbedTexts } from "./embed.mjs";
+import { embedConfiguredTexts } from "./embed.mjs";
+import { SEMANTIC_EVIDENCE_TIMEOUT_MS } from "./config.mjs";
 
-/** 默认嵌入函数:API 优先(与 embedResults 同后端),失败返回 null。 */
+/** 默认嵌入函数:服从全局后端配置,并限制为一次短请求。 */
 async function defaultEmbed(texts) {
-  return apiEmbedTexts(texts, { quiet: true });
+  return embedConfiguredTexts(texts, {
+    quiet: true,
+    apiTimeoutMs: SEMANTIC_EVIDENCE_TIMEOUT_MS,
+    apiMaxAttempts: 1,
+  });
 }
 
 /** 余弦相似度(向量已 L2 归一化时即点积;未归一化也兼容)。 */
@@ -52,7 +57,12 @@ export async function assessSemanticEvidence(
   const text = String(markdown || body || "").replace(/\s+/g, " ").trim();
   if (!titleText || text.length < 300) return null; // 正文太短,语义证据不可靠
 
-  const vectors = await embedFn([`标题:${titleText.slice(0, 120)}`, text.slice(0, simBodyChars)]);
+  let vectors;
+  try {
+    vectors = await embedFn([`标题:${titleText.slice(0, 120)}`, text.slice(0, simBodyChars)]);
+  } catch {
+    return null;
+  }
   if (!vectors || vectors.length < 2) return null;
 
   const sim = cosine(vectors[0], vectors[1]);

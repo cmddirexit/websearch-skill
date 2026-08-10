@@ -224,6 +224,20 @@ test("⑤c 直连 404 + 浏览器不可用:仍报页面不存在(404 是确定�
 });
 
 // ---------- ⑤d archive 冷却期:跳过存档直接浏览器(不可达网络省 ~20s) ----------
+test("archive 冷却分类:URL 无快照不冷却,全镜像基础设施失败才冷却", async () => {
+  const { isArchiveInfrastructureError, shouldCoolArchive } = await import("../../fetch-flow.mjs");
+  const noSnapshot = new Error("archive.ph: 快照无正文");
+  const notFound = Object.assign(new Error("HTTP 404"), { status: 404 });
+  const forbidden = Object.assign(new Error("HTTP 403"), { status: 403 });
+  const timeout = Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+  const unavailable = Object.assign(new Error("HTTP 503"), { status: 503 });
+  assert.equal(isArchiveInfrastructureError(noSnapshot), false);
+  assert.equal(isArchiveInfrastructureError(notFound), false);
+  assert.equal(isArchiveInfrastructureError(forbidden), true);
+  assert.equal(shouldCoolArchive([timeout, unavailable]), true);
+  assert.equal(shouldCoolArchive([timeout, noSnapshot]), false);
+});
+
 test("⑤d archive 冷却期:403 跳过存档直接浏览器,不再白等镜像超时", async () => {
   const { archiveCooldown } = await import("../../fetch-flow.mjs");
   reset(); silenceLog();
