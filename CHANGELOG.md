@@ -2,6 +2,13 @@
 
 本技能按语义化版本记录演进历史(提交哈希见 git log,全部为 `main` 分支)。
 
+## Unreleased — 内容证据链可靠性修复
+
+- 语义证据服从显式嵌入后端配置，`off` 不外发正文；API 使用短超时
+- 结构正证据接受语义反证，修复标题关键词填充绕过
+- 修复英文正文词界和中文正文 60 字符截断；v1 状态保守冷启动并持久化完整去重 ID
+- archive 仅在所有镜像均为基础设施故障时累计全局冷却
+
 ## 1.4.0 — fetch 兜底链提速
 
 > commit `c358a30`
@@ -33,7 +40,7 @@
 - **库导出补齐**(`index.mjs`):`assessSemanticEvidence` / `createContentBayes` /
   `bodyTokens` / `resolveContentEvidence` / `trainBayes` 等
 - **文档**:README/SKILL.md 新增「内容质量证据链」章节与调参表
-- 测试 299/299(新增 21 个:句长 6 + 语义 6 + 贝叶斯 11 + 证据链 8 + 集成)
+- 新增句长、语义、贝叶斯、证据链和集成测试覆盖
 
 ## 1.2.0 — 信誉学习系统重构(v4)
 

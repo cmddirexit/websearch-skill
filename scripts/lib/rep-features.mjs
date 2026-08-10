@@ -67,10 +67,11 @@ export function repKeys(url) {
   return keys;
 }
 
-/** 中文 2-gram(仅纯汉字,长度 ≤60 截断防长标题膨胀)
+/** 中文 2-gram(仅纯汉字,默认长度 ≤60 截断防长标题膨胀)
  * ⚠ 与 cluster.mjs 的 cnGrams 同族,改动行为时注意同步意图 */
-export function cnBigrams(str) {
-  const s = String(str || "").replace(/\s+/g, "").slice(0, 60);
+export function cnBigrams(str, maxChars = 60) {
+  const limit = Math.max(0, Math.trunc(maxChars) || 0);
+  const s = String(str || "").replace(/\s+/g, "").slice(0, limit);
   const out = new Set();
   for (let i = 0; i < s.length - 1; i++) {
     const g = s.slice(i, i + 2);

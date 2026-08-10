@@ -99,8 +99,8 @@ test("embed韧性: 连续失败进入冷却期(不再请求),成功恢复", asyn
   }
 });
 
-test("embed后端: WEBSEARCH_EMBED_BACKEND=off 不读 key、不请求网络", async () => {
-  const { embedResults } = await import("../../embed.mjs");
+test("embed后端: WEBSEARCH_EMBED_BACKEND=off 对结果与通用文本都不请求网络", async () => {
+  const { embedResults, embedConfiguredTexts } = await import("../../embed.mjs");
   const realBackend = process.env.WEBSEARCH_EMBED_BACKEND;
   const realFetch = globalThis.fetch;
   let calls = 0;
@@ -109,11 +109,59 @@ test("embed后端: WEBSEARCH_EMBED_BACKEND=off 不读 key、不请求网络", as
   try {
     const out = await embedResults([{ title: "t", url: "u", desc: "d" }], { query: "q" });
     assert.equal(out.available, false);
+    assert.equal(await embedConfiguredTexts(["标题", "正文"]), null);
     assert.equal(calls, 0);
   } finally {
     globalThis.fetch = realFetch;
     if (realBackend === undefined) delete process.env.WEBSEARCH_EMBED_BACKEND;
     else process.env.WEBSEARCH_EMBED_BACKEND = realBackend;
+  }
+});
+
+test("embed API: 单次调用受硬超时约束", async () => {
+  const { apiEmbedTexts, resetApiFailState } = await import("../../embed.mjs");
+  const realFetch = globalThis.fetch;
+  const realKey = process.env.SILICONFLOW_API_KEY;
+  process.env.SILICONFLOW_API_KEY = "test-only";
+  resetApiFailState();
+  globalThis.fetch = async (_url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  const started = Date.now();
+  try {
+    const out = await apiEmbedTexts(["slow"], { quiet: true, timeoutMs: 250, maxAttempts: 1 });
+    assert.equal(out, null);
+    assert.ok(Date.now() - started < 1_500, "超时后应快速降级");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (realKey === undefined) delete process.env.SILICONFLOW_API_KEY;
+    else process.env.SILICONFLOW_API_KEY = realKey;
+    resetApiFailState();
+  }
+});
+
+test("embed API: 单次模式仍允许移除不兼容 dimensions 后纠正请求", async () => {
+  const { apiEmbedTexts, resetApiFailState } = await import("../../embed.mjs");
+  const realFetch = globalThis.fetch;
+  const realKey = process.env.SILICONFLOW_API_KEY;
+  process.env.SILICONFLOW_API_KEY = "test-only";
+  resetApiFailState();
+  let calls = 0;
+  globalThis.fetch = async (_url, opts) => {
+    calls++;
+    const body = JSON.parse(opts.body);
+    if (body.dimensions) return { ok: false, status: 400, text: async () => "unsupported dimensions" };
+    return { ok: true, status: 200, json: async () => ({ data: [{ embedding: [1, 0] }] }) };
+  };
+  try {
+    const out = await apiEmbedTexts(["text"], { quiet: true, maxAttempts: 1 });
+    assert.deepEqual(out, [[1, 0]]);
+    assert.equal(calls, 2, "协议纠正一次,不扩张网络错误重试次数");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (realKey === undefined) delete process.env.SILICONFLOW_API_KEY;
+    else process.env.SILICONFLOW_API_KEY = realKey;
+    resetApiFailState();
   }
 });
 
@@ -197,4 +245,3 @@ test("tls: 成功清零 —— 失败后成功恢复,计数归零不误伤", asy
   assert.ok(!isTlsHostCooled(host), "成功清零后 1 次失败不应进入冷却");
   resetTlsFailState();
 });
-

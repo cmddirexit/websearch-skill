@@ -102,6 +102,14 @@ test("assessSemanticEvidence: 嵌入不可用 → null 静默降级", async () =
   assert.equal(ev, null);
 });
 
+test("assessSemanticEvidence: 嵌入函数抛错 → null 静默降级", async () => {
+  const ev = await assessSemanticEvidence(
+    { title: "任意标题", markdown: "正文内容足够长用于测试嵌入异常时的降级路径。".repeat(20) },
+    { embedFn: async () => { throw new Error("backend failed"); } },
+  );
+  assert.equal(ev, null);
+});
+
 test("assessSemanticEvidence: 正文太短 → null", async () => {
   let called = false;
   const fakeEmbed = async () => {

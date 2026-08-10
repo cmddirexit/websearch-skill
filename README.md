@@ -280,11 +280,14 @@ node scripts/backtest-meta.mjs
 
 ### 内容质量证据链（零词表）
 
-`fetch` 回写内容证据时按三级裁决，任一命中即止，全部模棱两可则保持中性（不训练）：
+`fetch` 回写内容证据时按三级裁决，全部模棱两可则保持中性（不训练）：
 
 ```
-结构证据(规则) → 语义证据(嵌入一致性) → 贝叶斯(历史标注自举)
+结构负证据 → 语义反证 → 结构正证据 → 贝叶斯(历史标注自举)
 ```
+
+高精度结构负证据立即生效；结构正证据必须先接受标题-正文语义反证，避免正文填充
+标题关键词后绕过一致性检测。
 
 **1. 结构证据**（`content-evidence.mjs`，纯规则、同步、零依赖）
 
@@ -297,9 +300,11 @@ node scripts/backtest-meta.mjs
 
 **2. 语义证据**（`semantic-evidence.mjs`，标题-正文嵌入余弦，零词表标题党检测）
 
-- 复用 `embed.mjs` API 嵌入，余弦 <0.4 → 标题党弱负证据(0.25)，置信度随错位加深
-- 嵌入不可用（无 key/本地模型）→ null 静默降级，不拖慢 fetch；只产负证据，
-  高相似度交给结构证据判断
+- 严格服从 `semantic.backend` / `WEBSEARCH_EMBED_BACKEND` 的
+  `off|api|local|wasm|auto` 配置；`off` 不读取密钥、不发送正文
+- API 单次调用默认 2.5 秒硬超时且不重试；`auto` 下 API 不可用才回退本地模型
+- 余弦 <0.4 → 标题党弱负证据(0.25)，置信度随错位加深；只产负证据，
+  高相似度交给结构证据判断，不可用则返回 null
 
 **3. 内容贝叶斯**（`content-bayes.mjs`，自举分类器，最终兜底）
 
@@ -310,8 +315,12 @@ node scripts/backtest-meta.mjs
 - 成熟门槛：有效样本 ≥40 且正/负类各 ≥10，未成熟时静默降级（预测返回 null）
 - 持久化 `~/.cache/websearch-content-bayes.json`（token 计数 + 去重 ID，损坏则冷启动）
 
+内容贝叶斯 v2 修复了英文词界和中文正文截断。旧 v1 token 语义不可无损转换，首次加载时
+会保守冷启动，不复用已污染计数。
+
 调参（环境变量）：`WEBSEARCH_BAYES_MIN_SAMPLES`(40)、`WEBSEARCH_BAYES_MIN_CLASS_SAMPLES`(10)、
 `WEBSEARCH_BAYES_TOP_K`(15)；语义阈值在 `semantic-evidence.mjs` 顶部常量。
+语义证据 API 超时可用 `WEBSEARCH_SEMANTIC_EVIDENCE_TIMEOUT_MS` 调整。
 
 证据链裁决抽离在 `evidence-chain.mjs`（`resolveContentEvidence` / `trainBayes`），
 bayes 与嵌入函数可注入，便于单测与扩展新证据源。
@@ -320,6 +329,9 @@ bayes 与嵌入函数可注入，便于单测与扩展新证据源。
 
 搜索侧使用总预算和单引擎超时，并行收集可用结果。连续失败的引擎会进入冷却期，成功后自动
 恢复；引擎注册、fallback 和聚合关系由 `engines.conf.json` 统一校验。
+
+archive 冷却只统计网络、限流和服务端故障；某个 URL 没有快照或快照无正文不会让整个
+archive 服务进入冷却。
 
 正文抓取按场景使用以下路径：
 

@@ -2,7 +2,7 @@
 // 全内存实例(file:null),不碰真实缓存;纯函数 + 合成样本,无网络
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContentBayes, bodyTokens } from "../../content-bayes.mjs";
@@ -38,9 +38,21 @@ function goodBody(i) {
 
 test("bayes: bodyTokens 提取中文 bigram + 英文词", () => {
   const t = bodyTokens("Python 异步编程教程:事件循环与任务调度");
-  assert.ok(t.has("Python") || [...t].some((x) => x.startsWith("pyth")), "英文词应被提取");
+  assert.ok(t.has("python"), "英文词应按原始词界提取并转小写");
   assert.ok(t.has("异步"), "中文 bigram 应被提取");
   assert.ok(t.size > 10);
+});
+
+test("bayes: 英文空白词界不被压缩,中文正文不受标题 60 字符上限", () => {
+  const english = bodyTokens("Python async programming event loop");
+  assert.deepEqual(
+    [...english].filter((token) => /[a-z]/.test(token)),
+    ["python", "async", "programming", "event", "loop"],
+  );
+  assert.ok(!english.has("pythonasyncprogrammi"), "不得把多个英文词拼接后截断");
+
+  const chinese = bodyTokens(`${"甲".repeat(80)}深度学习模型`);
+  assert.ok(chinese.has("深度"), "正文 60 字符之后的中文主题词仍应进入模型");
 });
 
 test("bayes: 空正文返回空集", () => {
@@ -142,6 +154,46 @@ test("bayes: 真实文件持久化 round-trip", () => {
     const before = b2.stats().samples;
     b2.learn(bodyTokens(badBody(3)), 0.2, { eventKey: "bad-3" });
     assert.equal(b2.stats().samples, before, "跨进程同事件去重");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bayes: v1 旧 token 语义不迁移,保守冷启动", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsbayes-v1-"));
+  const file = join(dir, "bayes.json");
+  try {
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      counts: { pythonasyncprogrammi: { g: 0, b: 20 } },
+      samples: 40,
+      goodSamples: 20,
+      badSamples: 20,
+      eventIds: ["old"],
+    }));
+    const bayes = createContentBayes({ file });
+    assert.deepEqual(bayes.stats(), {
+      samples: 0, goodSamples: 0, badSamples: 0, tokens: 0, ready: false,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bayes: 超过 5000 条后仍保留旧事件去重语义", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsbayes-dedupe-"));
+  const file = join(dir, "bayes.json");
+  try {
+    const b1 = createContentBayes({ file });
+    const tokens = new Set(["shared-token"]);
+    for (let i = 0; i < 5001; i++) {
+      assert.equal(b1.learn(tokens, 0.2, { eventKey: `event-${i}` }), true);
+    }
+    b1.save();
+    const b2 = createContentBayes({ file });
+    const before = b2.stats().samples;
+    assert.equal(b2.learn(tokens, 0.2, { eventKey: "event-0" }), false, "最早事件仍须去重");
+    assert.equal(b2.stats().samples, before);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

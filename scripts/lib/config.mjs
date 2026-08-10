@@ -163,6 +163,11 @@ export const SOGOU_COOLDOWN_MS = 5 * 60_000;
 /** 默认嵌入模型(中文优先,bge-small-zh 中文区分度实测最佳;中英均衡可换 multilingual-e5-small) */
 export const EMBED_BACKEND = process.env.WEBSEARCH_EMBED_BACKEND || USER_CONFIG.semantic?.backend || "auto";
 export const EMBED_MODEL = process.env.WEBSEARCH_EMBED_MODEL || USER_CONFIG.semantic?.localModel || "Xenova/bge-small-zh-v1.5";
+/** fetch 内容语义证据是后台增强:单次 API 调用必须在 CLI 等待窗口内快速完成。 */
+export const SEMANTIC_EVIDENCE_TIMEOUT_MS = Math.max(
+  250,
+  envNumber("WEBSEARCH_SEMANTIC_EVIDENCE_TIMEOUT_MS", 2_500),
+);
 /** 与簇心余弦 ≥ 此值才归簇;低于 → 自成簇/噪声(e5-small 同主题中文文档余弦约 0.5~0.7) */
 export const CLUSTER_SIM_THRESHOLD = 0.42;
 /** 与簇心余弦 ≥ 此值视为近似重复(转载/镜像页),簇内折叠计数 */
