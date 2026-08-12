@@ -230,22 +230,33 @@ export async function searchBing(query, limit) {
   let html, usedGlobal = false;
   if (!isZh) {
     // 英文查询:国际版优先(实测 mkt=en-US 生效,0% 中文且相关)
-    const gUrl = `${GLOBAL_BING_URL}?q=${encodeURIComponent(query)}&mkt=en-US&setlang=en&ensearch=1&count=${limit}`;
-    const gHtml = await httpGet(gUrl);
-    const g = parseBingHtml(gHtml, limit);
-    if (!g.blocked && g.results.length > 0) {
-      return {
-        engine: "bing",
-        mode: "direct",
-        blocked: false,
-        results: g.results,
-        note: "global.bing.com(国际版,规避 CN 地域污染)",
-      };
+    let gHtml = null;
+    try {
+      const gUrl = `${GLOBAL_BING_URL}?q=${encodeURIComponent(query)}&mkt=en-US&setlang=en&ensearch=1&count=${limit}`;
+      gHtml = await httpGet(gUrl);
+    } catch {
+      // global.bing.com 网络不可达(被墙/地区封锁):标记后走 cn.bing.com 回退
+      usedGlobal = true;
     }
-    usedGlobal = true;
+    if (gHtml !== null) {
+      const g = parseBingHtml(gHtml, limit);
+      if (!g.blocked && g.results.length > 0) {
+        return {
+          engine: "bing",
+          mode: "direct",
+          blocked: false,
+          results: g.results,
+          note: "global.bing.com(国际版,规避 CN 地域污染)",
+        };
+      }
+      usedGlobal = true;
+    }
   }
-  // 中文查询直接走中国版;英文查询在 global 失败后回退(污染检测触发 marginalia 降级链)
-  const url = `${BING_URL}?q=${encodeURIComponent(query)}&setlang=zh-CN&ensearch=0&count=${limit}`;
+  // 中文查询直接走中国版;英文查询在 global 失败/0条后回退 cn.bing.com(mkt=en-US 尽力保留英文结果,
+  // 污染检测 isLangPolluted 兜底:若仍返回大量中文结果则触发降级链)
+  const url = isZh
+    ? `${BING_URL}?q=${encodeURIComponent(query)}&setlang=zh-CN&ensearch=0&count=${limit}`
+    : `${BING_URL}?q=${encodeURIComponent(query)}&mkt=en-US&setlang=en&ensearch=1&count=${limit}`;
   html = await httpGet(url);
   const { blocked, results } = parseBingHtml(html, limit);
   if (usedGlobal && blocked) {
