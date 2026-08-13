@@ -191,17 +191,16 @@ export function createDomainReputation({ file = REP_FILE, bayes = contentBayes, 
    * 记录一个样本。域名级始终更新;learnMeta=true 时才更新跨域模式。
    * 模式 label = metaLabel(提供时)或 contribution —— LLM 内容可信度判断
    *   是可靠信号(quality 分只是形态分,学出来是主题偏置),见 learnFromResultsLLM;
-   * strong/trusted 保留为兼容参数;新调用应使用 recordContentEvidence 的 source/confidence。
    * 域名级:searchScore 用绝对 contribution 递减学习;重复低质模式惩罚(样本≥5 且低质率>0.6 → ×0.6)。
    * @param {Set<string>} tokens 激活 token 集
    * @param {number} metaLabel 跨域模式专用 label(可选;缺省=contribution)
    */
-  function record(url, contribution, { low = false, tokens = null, strong = false, trusted = false, metaLabel = null, learnMeta = null, metaSource = "explicit", metaConfidence = 1, metaEventKey = url, observationKey = url } = {}) {
+  function record(url, contribution, { low = false, tokens = null, metaLabel = null, learnMeta = null, metaSource = "explicit", metaConfidence = 1, metaEventKey = url, observationKey = url } = {}) {
     const shouldLearnMeta = learnMeta ?? metaLabel !== null;
     if (shouldLearnMeta) {
       recordMetaEvidence(url, tokens || urlTokens(url), metaLabel ?? contribution, {
         source: metaSource,
-        confidence: strong ? 1 : metaConfidence,
+        confidence: metaConfidence,
         eventKey: metaEventKey,
       });
     }
@@ -218,7 +217,6 @@ export function createDomainReputation({ file = REP_FILE, bayes = contentBayes, 
       let c = contribution;
       if (e.searchSamples >= 5 && e.lowHits / e.searchSamples > 0.6) c *= 0.6;
       updateScore(e, c);
-      if (trusted) e.trustedSamples = (e.trustedSamples || 0) + 1;
       if (low) e.lowHits++; else e.okHits++;
       e.lastSeen = Date.now();
     }
@@ -305,14 +303,6 @@ export function createDomainReputation({ file = REP_FILE, bayes = contentBayes, 
         observationKey: `${url}\u0000${r.title || ""}`,
       });
     }
-    return domains;
-  }
-
-  /**
-   * @deprecated 查询相关性不能作为全局域名质量标签。保留空操作以兼容旧调用方;
-   * 折叠只应影响当前查询的展示,不应改变跨查询持久化信誉。
-   */
-  function learnCollapsed(_collapsed) {
     return domains;
   }
 
@@ -550,7 +540,7 @@ export function createDomainReputation({ file = REP_FILE, bayes = contentBayes, 
   }
 
   return {
-    record, recordContentEvidence, recordMetaEvidence, learnFromResults, learnFromResultsLLM, learnCollapsed, learnSelection, learnFetch, learnFetchContent, learnFetchLLM: learnFetchContent, learnFetchBlocked, lookup, applyToResults, stats, save, reset,
+    record, recordContentEvidence, recordMetaEvidence, learnFromResults, learnFromResultsLLM, learnSelection, learnFetch, learnFetchContent, learnFetchBlocked, lookup, applyToResults, stats, save, reset,
     _raw: () => domains, _meta: () => meta, _events: () => events,
   };
 }

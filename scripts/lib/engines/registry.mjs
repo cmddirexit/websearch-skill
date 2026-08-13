@@ -71,11 +71,10 @@ export const ENGINE_LABELS = {
   "bing-browser": "bing(浏览器)",
 };
 
-/** 不参与通用聚合 "all" 的专用引擎
- * cnnews=官方新闻白名单,气质与通用搜索不同;
- * searx=公共 SearXNG 实例需梯子/触发浏览器兜底(本机无梯子,库模式易 OOM),聚合时排除
- * (单引擎 --engine searx 仍可用,不受影响) */
-// 不参与多引擎聚合的引擎(浏览器兜底型/专属型;单引擎 --engine xxx 仍可用)
+/** 不参与通用聚合 "all" 的专用引擎(单引擎 --engine xxx 仍可用):
+ *  cnnews=官方新闻白名单,气质与通用搜索不同;
+ *  searx=公共 SearXNG 实例需梯子/触发浏览器兜底(本机无梯子,库模式易 OOM);
+ *  chinaso=官方 JSON API,聚合会放大其 IP 限风险,排除。 */
 const AGGREGATE_EXCLUDE = new Set(["cnnews", "searx", "chinaso"]);
 
 const CONF_FILE = fileURLToPath(new URL("../engines.conf.json", import.meta.url));

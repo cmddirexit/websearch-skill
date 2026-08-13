@@ -93,7 +93,7 @@ mock.module("../../domain-rep.mjs", {
     createDomainReputation: () => ({
       learnSelection: (url) => calls.selection.push(url),
       learnFetch: () => {}, learnFetchBlocked: () => {},
-      learnFetchContent: async () => {}, learnFetchLLM: async () => {}, learnFromResultsLLM: async () => {},
+      learnFetchContent: async () => {}, learnFromResultsLLM: async () => {},
       learnFromResults: async () => {}, save: async () => {},
     }),
   },

@@ -110,7 +110,7 @@ test("relevance分级: gradeCluster 三档映射 + unscored 回退", () => {
   const t = computeRelThresholds([0.59, 0.36, 0.32]); // edge=0.5, irrelevant=0.25
   assert.equal(gradeCluster(0.59, t), "relevant");
   assert.equal(gradeCluster(0.5, t), "relevant", "等于 edge 线也算相关");
-  assert.equal(gradeCluster(0.36, t), "edge", "边缘区:标题+URL,不给摘要");
+  assert.equal(gradeCluster(0.36, t), "edge", "边缘区:标题+短摘要+URL");
   assert.equal(gradeCluster(0.25, t), "edge", "等于 irrelevant 线仍算边缘(不在无关区)");
   assert.equal(gradeCluster(0.24, t), "irrelevant", "低于无关线 → 折叠区");
   assert.equal(gradeCluster(null, t), "unscored", "无嵌入 → unscored,调用方走原逻辑");
@@ -197,21 +197,29 @@ test("relevance折叠: 近似重复项保留 URL 与代表关系", () => {
 });
 
 
-test("relevance决策: buildPresentation 折叠/展示分流(默认读 config,零传参)", () => {
+test("relevance决策: buildPresentation 三档分流(默认读 config,零传参)", () => {
   const clusters = [
     { label: "Launch HN", size: 5, semScore: 0.59, score: 0.44 },
     { label: "best 是什么意思", size: 9, semScore: 0.36, score: 0.37 },
     { label: "BEST 装置", size: 1, semScore: 0.32, score: 0.33 },
+    { label: "无关词典页", size: 2, semScore: 0.2, score: 0.2 },
   ];
-  // 默认 balanced:相关簇 shown,其余折叠(无需 cli 传阈值参数)
+  // 默认 balanced:relevant 完整展示 / edge 精简展示 / irrelevant 折叠
   const p = buildPresentation(clusters);
   assert.deepEqual(p.shown.map((c) => c.label), ["Launch HN"], "相关簇进 shown");
-  assert.deepEqual(p.collapsed.map((c) => c.label).sort(), ["BEST 装置", "best 是什么意思"].sort(), "边缘+无关全折叠");
+  assert.deepEqual(p.edge.map((c) => c.label).sort(), ["BEST 装置", "best 是什么意思"].sort(), "边缘簇进 edge");
+  assert.deepEqual(p.collapsed.map((c) => c.label), ["无关词典页"], "无关簇折叠");
   assert.ok(p.thresholds && p.thresholds.edge >= 0.5, "阈值已计算(自适应,读 config 默认)");
+  // aggressive:edge+irrelevant 都折叠,只保留 relevant 完整展示
+  const pa = buildPresentation(clusters, { relMode: "aggressive" });
+  assert.deepEqual(pa.shown.map((c) => c.label), ["Launch HN"], "aggressive 只保留相关簇");
+  assert.deepEqual(pa.edge, [], "aggressive 不单独展示边缘簇");
+  assert.deepEqual(pa.collapsed.map((c) => c.label).sort(), ["BEST 装置", "best 是什么意思", "无关词典页"].sort(), "aggressive 折叠边缘+无关");
   // conservative:只排序不折叠,全进 shown
   const pc = buildPresentation(clusters, { relMode: "conservative" });
   assert.equal(pc.collapsed.length, 0, "conservative 不折叠");
-  assert.equal(pc.shown.length, 3, "conservative 全展开");
+  assert.equal(pc.edge.length, 0, "conservative 不分边缘档");
+  assert.equal(pc.shown.length, 4, "conservative 全展开");
   // 无语义分(嵌入不可用):thresholds=null,全进 shown(零回归)
   const pn = buildPresentation([{ label: "x", size: 1, semScore: null }]);
   assert.equal(pn.thresholds, null);

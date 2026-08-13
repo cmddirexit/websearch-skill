@@ -95,7 +95,7 @@ export async function printResults(r, query, flat = false, semantic = null) {
     // AI 从簇名即知折叠了什么(如"best 是什么意思"→词典页);详情写缓存文件,
     // 搜索完成后可 websearch.mjs reveal(或直接读文件)展开查看。URL 永不丢。
     // conservative 模式:只排序不折叠,全量展开;无嵌入时全部走原逻辑(零回归)。
-    const { shown, collapsed } = buildPresentation(clusters);
+    const { shown, edge, collapsed } = buildPresentation(clusters);
     // 折叠是本次查询的相关性判断,不是站点内容质量证据,不得写入全局域名信誉。
     for (const c of shown) {
       const parts = [`📦 [${c.label}] 相关度 ${c.score.toFixed(2)} · ${c.size} 条`];
@@ -135,6 +135,28 @@ export async function printResults(r, query, flat = false, semantic = null) {
       });
       console.log();
     }
+    // 边缘簇:标题+短摘要+URL(摘要截断降低误导风险,同时保留信息;URL 永不丢)
+    if (edge.length > 0) {
+      const edgeTotal = edge.reduce((s, c) => s + c.size, 0);
+      console.log(`📦 边缘相关 ${edge.length} 簇 / ${edgeTotal} 条(短摘要,仅供参考)`);
+      for (const c of edge) {
+        const sem = c.semScore !== null && c.semScore !== undefined ? ` · 语义 ${c.semScore.toFixed(2)}` : "";
+        console.log(`   [${c.label}] ${c.size} 条${sem}`);
+        for (const x of c.items || []) {
+          const badge = x.flags && x.flags.length > 0 ? ` ⚠[${x.flags.join(",")}]` : "";
+          const repBadge_ = x.rep?.badge ? ` ${x.rep.badge}` : "";
+          console.log(`   ${stripControl(x.title)}${badge}${repBadge_}`);
+          const desc = x.desc ? stripControl(x.desc) : "";
+          if (desc) console.log(`   ${desc.slice(0, 120)}${desc.length > 120 ? "…" : ""}`);
+          if (x.url) console.log(`   🔗 ${x.url}`);
+        }
+        for (const d of c.duplicateItems || []) {
+          console.log(`   [近似重复] ${stripControl(d.title || "(无标题)")}`);
+          if (d.url) console.log(`   🔗 ${d.url}`);
+        }
+      }
+      console.log();
+    }
     // 折叠区:一行摘要(簇名×条数+语义分),详情写缓存文件供 reveal/直接读取
     if (collapsed.length > 0) {
       const total = collapsed.reduce((s, c) => s + c.size, 0);
@@ -161,19 +183,19 @@ export async function printResults(r, query, flat = false, semantic = null) {
     }
     return;
   }
-  // 平铺模式:尝试语义重排(query↔文档余弦降序,ML 温和排序,不剔除任何结果)。
+  // 平铺模式:先规则过滤(硬剔除广告),再尝试语义重排(query↔文档余弦降序,ML 温和排序)。
   // 解决英文查询被词典/翻译结果占前排的问题 —— 词典页与查询语义距离远,自然沉底。
   // (聚类分支在上方已 return,执行到这里必为 flat 或结果 <2)
-  // 平铺也学习(quality/flags 由 filterResults 原地附加,不改展示顺序;badge 供展示)
-  const flatKept = filterResults(r.results).kept;
-  rep.applyToResults(r.results);
+  // 平铺同样学习:quality/flags 由 filterResults 原地附加到 kept 元素;广告(ad:*)不展示也不学习。
+  const { kept: flatKept, ads } = filterResults(r.results);
+  rep.applyToResults(flatKept);
   queueLLMLearn(flatKept);
-  let list = r.results;
-  if (semantic !== false && r.results.length >= 2) {
+  let list = flatKept;
+  if (semantic !== false && flatKept.length >= 2) {
     try {
-      const em = await embedResults(r.results, { quiet: true, query });
-      if (em.available && em.qVec && em.vectors && em.vectors.length === r.results.length) {
-        const scored = r.results.map((x, i) => ({ x, rel: Math.max(0, cosine(em.qVec, em.vectors[i])) }));
+      const em = await embedResults(flatKept, { quiet: true, query });
+      if (em.available && em.qVec && em.vectors && em.vectors.length === flatKept.length) {
+        const scored = flatKept.map((x, i) => ({ x, rel: Math.max(0, cosine(em.qVec, em.vectors[i])) }));
         scored.sort((a, b) => b.rel - a.rel);
         list = scored.map((v) => ({ ...v.x, rel: v.rel }));
         console.log(`🧠 语义重排: ${em.backend === "api" ? `API(${em.model})` : "local"} 按查询相关性降序`);
@@ -185,7 +207,7 @@ export async function printResults(r, query, flat = false, semantic = null) {
   // 时间意图查询(本周/最近/最新…):旧文沉底(在语义重排之后做,不破坏语义排序;
   // 无意图时原样返回零开销;同样不改 quality,不污染信誉学习)
   list = applyRecencyOrder(list, query);
-  console.log(`🔍 ${label} 搜索 "${query}" → ${r.results.length} 条结果\n`);
+  console.log(`🔍 ${label} 搜索 "${query}" → ${r.results.length} 条(剔除广告 ${ads.length} · 平铺)\n`);
   list.forEach((x, i) => {
     const staleTag = x.staleDays ? ` ⏳${x.staleDays}天前旧文` : "";
     console.log(`${i + 1}. ${x.title}${x.rel !== undefined ? ` (语义相关 ${x.rel.toFixed(2)})` : ""}${x.rep?.badge ? ` ${x.rep.badge}` : ""}${staleTag}`);
@@ -194,7 +216,7 @@ export async function printResults(r, query, flat = false, semantic = null) {
     console.log(`   🔗 ${x.url}`);
     console.log();
   });
-  if (r.results.length === 0) console.log("(无结果,可尝试换关键词或引擎)");
+  if (flatKept.length === 0) console.log("(无结果,可尝试换关键词或引擎)");
 }
 
 /** 输出抓取结果:缓存存完整正文(见 emitFetchResult),这里按请求的 maxChars 截断展示 ——

@@ -278,6 +278,29 @@ test("cluster复用: options 可注入停用词表/合并阈值", () => {
 // 对应审查发现并修复的 bug,防止后续重构回退
 
 
+test("cluster语义: 质心归一化修复(均值模长不再低估相似度)", () => {
+  // v1=[1,0] 与 v2=[0.8,0.6] 余弦 0.8 → 聚成一簇,和向量 [1.8,0.6](|sum|≈1.897)。
+  // 修复前质心是未归一化均值 [0.9,0.3](模长 0.949),把"新文档 vs 质心"的相似度
+  // 系统性乘 0.949。v3=[0.1231,0.9924]:
+  //   与归一化质心余弦 = 0.4306(≥0.42 应入簇)
+  //   与未归一化质心点积 = 0.4085(<0.42 修复前被拒 → 碎片化成 2 簇)
+  const results = [
+    { title: "alpha article", url: "a" },
+    { title: "beta article", url: "b" },
+    { title: "gamma article", url: "c" },
+  ];
+  const { clusters } = clusterResults(results, "none", {
+    vectors: [[1, 0], [0.8, 0.6], [0.1231, 0.9924]],
+    simThreshold: 0.42,
+    dupThreshold: 1.01,      // 关闭近似重复折叠
+    reprintThreshold: 0.95,  // 关闭转载预处理(v1·v2=0.8 不进候选)
+    bucketSingletons: false, // 关闭单例桶合并,避免单例被并回掩盖差异
+  });
+  assert.equal(clusters.length, 1, "v3 与真实质心余弦≥阈值应入簇(修复前被模长压低而碎片化)");
+  assert.equal(clusters[0].size, 3, "三条应聚一簇");
+});
+
+
 test("cluster语义: 同主题收敛,离群点进 uncovered(噪声语义)", () => {
   const results = [
     { title: "Python 爬虫入门", url: "a" },

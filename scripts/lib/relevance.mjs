@@ -4,7 +4,7 @@
  * 职责:把语义分(0~1,query↔文档余弦,见 cluster.mjs 的 semScore/rel)映射为
  * 三档展示级别,并生成可读的原因描述 —— 供 CLI 决定"给 LLM 多少信息":
  *   relevant    完整展示(标题+摘要+URL)
- *   edge        标题+URL,不给摘要 —— 摘要最易误导 LLM 引用,边缘结果省去
+ *   edge        精简展示(标题+短摘要+URL)—— 摘要截断,兼顾信息与防误导
  *   irrelevant  沉底折叠区,只留 URL+原因 —— 信息不删,但明确提示可忽略
  *
  * 设计原则(可维护性):
@@ -95,29 +95,38 @@ export function irrelevantReason(cluster, opts = {}) {
 /**
  * 折叠/展示决策(纯函数)——从 cli.mjs 提取的核心决策逻辑,库复用方可直接调用。
  *
- * 规则:
- *  - 无语义分(thresholds=null)或 conservative 模式 → 全部进 shown(零回归)
- *  - 默认模式:grade !== relevant 的簇进 collapsed(edge+irrelevant 全折叠,
- *    折叠只是压缩展示,URL 在 reveal 文件里,信息不删)
+ * 三档分级(仅语义分可用时;无语义分则全进 shown 零回归):
+ *  - relevant   完整展示(标题+摘要+URL)
+ *  - edge       精简展示(标题+短摘要+URL —— 摘要截断,降低误导同时不丢信息)
+ *  - irrelevant 折叠成一行(簇名×条数+语义分),详情写 reveal 文件,URL 不丢
+ * 模式差异:
+ *  - balanced(默认):三档全用
+ *  - aggressive:edge+irrelevant 都折叠成一行(只保留 relevant 完整展示)
+ *  - conservative:只排序不折叠(全进 shown)
  *
  * @param {Array} clusters clusterResults 输出的簇数组(带 semScore)
- * @param {{relMode?:string}} [opts] relMode: balanced(默认折叠)/ conservative(只排序不折叠)
- * @returns {{thresholds:Object|null, shown:Array, collapsed:Array}}
- *          thresholds={edge,irrelevant,top}|null;shown/collapsed 均为簇对象数组
+ * @param {{relMode?:string}} [opts] relMode: balanced / aggressive / conservative
+ * @returns {{thresholds:Object|null, shown:Array, edge:Array, collapsed:Array}}
+ *          thresholds={edge,irrelevant,top}|null
  */
 export function buildPresentation(clusters, opts = {}) {
   const d = relDefaults(opts);
   const thresholds = clusters.some((c) => typeof c.semScore === "number")
     ? computeRelThresholds(clusters.map((c) => c.semScore), d)
     : null;
-  const foldAll = d.relMode !== "conservative";
+  const foldEdge = d.relMode === "aggressive";
   const shown = [];
+  const edge = [];
   const collapsed = [];
   for (const c of clusters) {
-    const grade = foldAll && thresholds ? gradeCluster(c.semScore, thresholds) : "relevant";
-    (grade === "relevant" ? shown : collapsed).push(c);
+    const grade = thresholds && d.relMode !== "conservative"
+      ? gradeCluster(c.semScore, thresholds)
+      : "relevant";
+    if (grade === "relevant") shown.push(c);
+    else if (grade === "edge" && !foldEdge) edge.push(c);
+    else collapsed.push(c);
   }
-  return { thresholds, shown, collapsed };
+  return { thresholds, shown, edge, collapsed };
 }
 
 /**

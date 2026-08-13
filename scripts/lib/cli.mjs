@@ -103,7 +103,9 @@ async function runSearch(query, engineName, limit, flat, semantic, since) {
   // 多引擎聚合(limit>10 且引擎声明了聚合伙伴):并行抓取 + URL 去重合并,
   // 突破单引擎单页 ~10 条硬限(实测 count/first/滚动/点击翻页全部被忽略)
   const partners = engine.aggregateWith || [];
-  if (limit > 10 && partners.length > 0) {
+  // 空查询(仅 cnnews 热点模式合法)聚合无意义:bing/baidu/github 空 query 只会返回空/报错,
+  // 且会误伤 github 触发 rate limit 进入冷却 —— 直接走单引擎分支。
+  if (limit > 10 && partners.length > 0 && query.trim()) {
     const agg = await aggregateSearch(ENGINES, query, limit, [engineName, ...partners], deadline, { since });
     if (!agg.blocked && agg.results.length > 0) {
       await printResults(applySince(agg, since), query, flat, semantic);
@@ -173,7 +175,7 @@ export async function main(args) {
     let limit = DEFAULT_SEARCH_LIMIT; // 默认拉满:99 是聚合上限而非保证值
     let flat = false;
     let semantic = null; // null=自动尝试(装了嵌入可用,不可用静默降级); true/false 强制
-    let since = ""; // 时效过滤(24h|1w|1m|1y),目前仅 chinaso 生效(官方 API stime/etime)
+    let since = ""; // 时效过滤(24h|1w|1m|1y):结果级统一硬过滤(applySince)+ chinaso 额外 API 层过滤(stime/etime)
     const queryParts = [];
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i];

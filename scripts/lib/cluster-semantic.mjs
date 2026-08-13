@@ -15,12 +15,24 @@ import { isNearDuplicateTitle } from "./html.mjs";
 
 // ---- 余弦相似度 ----
 
-/** 两个等长向量(嵌入)的余弦相似度,要求已 L2 归一化(embed.mjs 输出即归一化) */
+/** 两个等长向量(嵌入)的余弦相似度,要求已 L2 归一化(embed.mjs 输出即归一化)。
+ *  ⚠️ 比较质心时必须先 l2Normalize:均值向量模长 <1,直接点积会低估相似度。 */
 export function cosine(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
   let s = 0;
   for (let i = 0; i < a.length; i++) s += a[i] * b[i];
   return s;
+}
+
+/** L2 归一化(返回新数组)。质心是成员向量的和/均值,模长 <1;而 cosine 是点积
+ *  (要求两向量都归一化),未归一化质心会把相似度系统性压低(内部一致度 0.42 的簇
+ *  压低 ~16%),导致聚类碎片化。零向量(成员完全对消,几乎不可能)保持原样防 NaN。 */
+export function l2Normalize(v) {
+  let sq = 0;
+  for (const x of v) sq += x * x;
+  const len = Math.sqrt(sq);
+  if (!len) return v;
+  return v.map((x) => x / len);
 }
 
 /** 向量列表 → 对称相似度矩阵(下三角,row<col 时 matrix[row][col]) */
@@ -215,25 +227,27 @@ function greedyClusterByCentroid(docs, opts) {
       continue;
     }
     if (best && bestSim >= opts.simThreshold) {
-      const n = best.members.length;
-      best.centroid = best.centroid.map((v, i) => (v * n + d.vec[i]) / (n + 1));
+      best.sum = best.sum.map((v, i) => v + d.vec[i]);
+      best.centroid = l2Normalize(best.sum); // 质心必须归一化,点积才等于余弦(见 l2Normalize)
       best.members.push(d);
       best.tokens.push(...d.tokens); // 簇标签用各自的 token 集(避免回退全局最高 df 词)
     } else {
-      clusters.push({ members: [d], centroid: [...d.vec], dups: 0, duplicateMembers: [], tokens: [...d.tokens] });
+      clusters.push({ members: [d], sum: [...d.vec], centroid: [...d.vec], dups: 0, duplicateMembers: [], tokens: [...d.tokens] });
     }
   }
   return clusters;
 }
 
-/** 重算簇质心(均值;split 单例回收并入后调用) */
+/** 重算簇质心(和向量累积 → L2 归一化;split 单例回收并入后调用)。
+ *  质心必须归一化:cosine 是点积,均值向量模长 <1 会系统性低估相似度。 */
 function recomputeCentroid(c) {
   const n = c.members.length;
   if (n === 0) return;
   const dim = c.members[0].vec.length;
   const sum = new Array(dim).fill(0);
   for (const d of c.members) for (let k = 0; k < dim; k++) sum[k] += d.vec[k];
-  c.centroid = sum.map((v) => v / n);
+  c.sum = sum;
+  c.centroid = l2Normalize(sum);
 }
 
 /**

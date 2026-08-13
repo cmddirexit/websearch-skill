@@ -207,15 +207,6 @@ test("rep: 抓取可用性与内容质量分离 — 空壳不污染内容模型"
 });
 
 
-test("rep: 查询低相关折叠不写入全局域名信誉", () => {
-  const rep = createDomainReputation({ file: null });
-  rep.learnCollapsed([
-    { items: [{ url: "https://dict-site.com/a" }, { url: "https://dict-site.com/b" }] },
-  ]);
-  assert.equal(rep.lookup("https://dict-site.com/c"), null, "本次查询不相关不代表域名低质量");
-});
-
-
 test("rep: 软降权应用 — quality 乘因子,低信誉压沉不剔除,冷启动零影响", () => {
   const rep = createDomainReputation({ file: null });
   for (let i = 0; i < 3; i++) {

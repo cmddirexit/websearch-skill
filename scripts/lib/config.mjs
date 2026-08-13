@@ -15,31 +15,53 @@ export function envNumber(name, fallback, env = process.env) {
 }
 
 // ---- HTTP ----
-/** 桌面 Chrome UA(httpGet 与浏览器兜底共用,反爬伪装) */
 /**
  * 生成 Chrome 桌面版 UA。版本参数化:浏览器层(engines/browser.mjs)会探测本地
  * chromium 实际版本并覆盖 —— UA 必须与真实浏览器版本匹配,否则知乎等站按
  * “UA 版本与实现不符”的风控逻辑拒绝(实测 Chrome120 UA + Chromium149 → 40362)。
- * 默认 149 与当前 Termux x11-repo 的 chromium 一致;升级后只改默认值或依赖探测。
+ * 直连层(http.mjs)用此兜底值:默认 149 与当前 Termux x11-repo 的 chromium 一致;
+ * 升级 chromium 后设 WEBSEARCH_CHROME_VERSION 或改默认值,让直连层与浏览器层对齐。
  */
-export function buildChromeUa(version = "149.0.0.0") {
+const DEFAULT_CHROME_VERSION = process.env.WEBSEARCH_CHROME_VERSION || "149.0.0.0";
+
+export function buildChromeUa(version = DEFAULT_CHROME_VERSION) {
   return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
 }
 
 export const UA = buildChromeUa();
-/** 通用请求头(http.mjs 与 tls.mjs 共用,避免各自复制导致改一处不同步) */
+/** sec-ch-ua 客户端提示头:与 UA 主版本对齐(动态生成,升级 chromium 后自动跟随)。
+ * Not:A-Brand 版本随 Chrome 大版本变化,取近似值即可(站点主要校验主版本一致)。 */
+const SEC_CH_UA = `"Chromium";v="${DEFAULT_CHROME_VERSION.split(".")[0]}", "Not:A-Brand";v="24"`;
+/** 通用请求头(http.mjs 与 tls.mjs 共用,避免各自复制导致改一处不同步)。
+ * 补齐现代浏览器的 sec-ch-ua / sec-fetch-* / upgrade-insecure-requests 客户端提示:
+ * 知乎/搜狗等站按“请求头是否像真实浏览器”做风控,缺失这些头是明显爬虫特征。
+ * 注意:不放 Cache-Control(真实浏览器首次导航不带,no-cache 反而是爬虫特征);
+ * 不放 accept-encoding(undici 自动解压,手动加会导致双重解码)。 */
 export const REQ_HEADERS = {
   "User-Agent": UA,
   Accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-  "Cache-Control": "no-cache",
+  "sec-ch-ua": SEC_CH_UA,
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "none",
+  "sec-fetch-user": "?1",
+  "Upgrade-Insecure-Requests": "1",
 };
 /** 百度移动端 UA(绕过桌面 UA 风控,实测稳定);版本同样参数化 */
-export function buildMobileUa(version = "149.0.0.0") {
+export function buildMobileUa(version = DEFAULT_CHROME_VERSION) {
   return `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Mobile Safari/537.36`;
 }
 export const UA_MOBILE = buildMobileUa();
+/** 微信文章专用 UA:微信内置浏览器(MicroMessenger)指纹。微信文章对普通浏览器 UA
+ * 会弹"环境异常"验证码(poc_token),对微信内置浏览器 UA 则正常返回正文 ——
+ * 微信内分享文章就是靠这个 UA 打开的。实测稳定(见 docs/ANTIBOT.md「微信文章」)。 */
+export const WECHAT_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.43";
+export const WECHAT_REFERER = "https://mp.weixin.qq.com/";
 /** httpGet 默认超时(搜索页) */
 export const HTTP_TIMEOUT_MS = envNumber("WEBSEARCH_HTTP_TIMEOUT_MS", USER_CONFIG.network?.httpTimeoutMs ?? 10_000);
 /** httpGetFull 默认超时(大页面正文) */
@@ -103,7 +125,7 @@ export const BROWSER_PATH = USER_CONFIG.browser?.path || "";
 export const BROWSER_PROFILE_PREFIX = "wschromium";
 /** 浏览器兜底调试日志:CLI 失败时完整 stderr/退出码/命令行落盘(替代只留 80 字符的截断报错) */
 export const BROWSER_DEBUG_LOG = `${CACHE_DIR}/websearch-browser-debug.log`;
-/** stealth 视口:与 UA(Windows Chrome/120)一致的"常驻访客"画像,库模式 newPage 时设置 */
+/** stealth 视口:常驻访客桌面画像(与桌面 UA 一致),库模式 newPage 时设置 */
 export const STEALTH_VIEWPORT_W = 1366;
 export const STEALTH_VIEWPORT_H = 768;
 /** stealth 注入脚本的浏览器语言(与 Accept-Language 对齐) */
@@ -114,7 +136,8 @@ export const STEALTH_LOCALE = "zh-CN";
 export const TLS_FALLBACK_ENABLED = process.env.WEBSEARCH_TLS_FALLBACK !== "0";
 /** impersonate 请求超时(快速失败,不拖慢降级链) */
 export const TLS_FALLBACK_TIMEOUT_MS = 10_000;
-/** impersonate 目标指纹(与 UA 版本对齐:Chrome/120) */
+/** impersonate 目标指纹:curl-impersonate 内置的 Chrome 指纹版本(其支持列表固定,
+ *  不跟随本地 chromium 版本,与直连 UA 的版本号无关,勿混淆) */
 export const TLS_IMPERSONATE_TARGET = "chrome120";
 
 // ---- TLS 兜底可用性探测 ----

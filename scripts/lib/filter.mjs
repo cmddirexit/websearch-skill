@@ -292,7 +292,7 @@ export function applyRecencyOrder(results, query) {
     } else fresh.push(r);
   }
   if (!aged.length) return results;
-  aged.sort((a, b) => (b.staleDays || 0) - (a.staleDays || 0)); // 最旧的排最后
+  aged.sort((a, b) => (a.staleDays || 0) - (b.staleDays || 0)); // 升序:较旧的在前、最旧的沉底到最后
   return [...fresh, ...aged];
 }
 

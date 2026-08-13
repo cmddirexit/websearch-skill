@@ -1,5 +1,5 @@
 /**
- * fetch-flow.mjs — 抓取调度:直连 → 存档 → 浏览器兜底链
+ * fetch-flow.mjs — 抓取调度:直连 → 浏览器 → 存档兜底链
  *
  * 从 cli.mjs 拆出(2026-08 重构):runFetch 的决策链(缓存命中/直连达线/空壳兜底/
  * CF 快速通道/404 归因/错误分诊)+ 存档兜底独立成模块,cli.mjs 变为调度门面
@@ -183,37 +183,17 @@ export async function runFetch(url, maxChars) {
     // 404 页(Next.js 等 SSR 站尤其如此)。直接标记 notFound,浏览器确认一次后报准确错误。
     const isNotFound = /HTTP 404|status 404|\b404\b/.test(e.message);
     if (isNotFound) {
-      dbg(`直连 HTTP 404 → 页面不存在(非反爬/网络错误),跳过存档,浏览器确认...`);
+      dbg(`直连 HTTP 404 → 页面不存在(非反爬/网络错误),浏览器确认后报准确错误`);
     }
-    // 存档兜底条件:非反爬硬墙站 且 非冷却期 且 有 HTTP 状态(网络层失败 fetch failed/aborted 时
-    // archive 站同样不可达,实测纯浪费;只有 HTTP 403/5xx 才有存档价值,如知乎直连 403)。
-    // 冷却期:archive 连续失败达阈值后跳过(不可达网络下省 ~20s),成功自动恢复。
-    let ar = null;
-    if (!isKnownAnti && !archiveCooldown.isCooled("archive") && e.status && !isNotFound) {
-      try {
-        ar = await dbgStep("存档兜底(wayback+today)", () => fetchViaArchive(url, MAX_BODY_CHARS));
-        if (ar) archiveCooldown.mark("archive", true);
-      } catch (ae) {
-        if (ae.archiveInfrastructureFailure) archiveCooldown.mark("archive", false);
-        console.error(`[degrade] 存档兜底不可用(${ae.message})`);
-        dbg(`存档兜底失败: ${String(ae.message).slice(0, 120)}`);
-      }
-      if (ar) {
-        dbg(`✓ 存档命中: ${brief(ar)}`);
-        feedback(ar);
-        emitFetchResult(ar, maxChars);
-        return;
-      }
-    }
-    // 2) 浏览器兜底
-    console.error(`[degrade] 存档无快照,尝试浏览器兜底...`);
+    // 1) 浏览器兜底(优先):能渲染 JS、过验证页,实测价值远高于存档;而存档(web.archive.org)
+    // 在多数网络环境下不可达,先跑存档会白等 ~20s 超时。浏览器先上,失败再退回存档。
+    // CF 验证站/网络层失败(无 HTTP 状态):库模式 CDP 泄漏必被拦且网络层失败时
+    // 库模式同样连不上 —— 跳过库模式与虚拟时间轮,直接 CLI 真实等待轮(省 ~10-30s)
+    // 直连已 404:跳过 zendriver(它会对 404 页空等 60s 拿同一张壳),库模式
+    // 8-9s 即可确认浏览器渲染后仍是 404 页,无需 CLI 真实等待轮
     let br = null;
     let browserErr = null; // 保存浏览器失败原因,最终错误归因用(P0-1)
     try {
-      // CF 验证站/网络层失败(无 HTTP 状态):库模式 CDP 泄漏必被拦且网络层失败时
-      // 库模式同样连不上 —— 跳过库模式与虚拟时间轮,直接 CLI 真实等待轮(省 ~10-30s)
-      // 直连已 404:跳过 zendriver(它会对 404 页空等 60s 拿同一张壳),库模式
-      // 8-9s 即可确认浏览器渲染后仍是 404 页,无需 CLI 真实等待轮
       br = await dbgStep("浏览器兜底", () =>
         fetchViaBrowser(url, MAX_BODY_CHARS, {
           preferCli: isKnownAnti || !e.status,
@@ -249,6 +229,27 @@ export async function runFetch(url, maxChars) {
       dbg(`直连 404 + 浏览器兜底无正文 → 确证页面不存在`);
       throw new Error(`页面不存在(HTTP 404): ${url}。直连返回 404,浏览器渲染后仍无正文 —— 该 URL 不存在或已被删除。请检查链接拼写/时效,或改用站点搜索获取正确 URL。`);
     }
+    // 2) 存档兜底(浏览器失败后的最后手段):非反爬硬墙站 且 非冷却期 且 有 HTTP 状态
+    // (网络层失败 fetch failed/aborted 时 archive 站同样不可达;只有 HTTP 5xx 临时故障
+    // 才有存档价值,如源站 502/503 —— 反爬硬墙站已由 isKnownAnti 排除,archive 同样拿不到)。
+    // 冷却期:archive 连续失败达阈值后跳过(不可达网络下省 ~20s),成功自动恢复。
+    let ar = null;
+    if (!isKnownAnti && !archiveCooldown.isCooled("archive") && e.status && !isNotFound) {
+      try {
+        ar = await dbgStep("存档兜底(wayback+today)", () => fetchViaArchive(url, MAX_BODY_CHARS));
+        if (ar) archiveCooldown.mark("archive", true);
+      } catch (ae) {
+        if (ae.archiveInfrastructureFailure) archiveCooldown.mark("archive", false);
+        console.error(`[degrade] 存档兜底不可用(${ae.message})`);
+        dbg(`存档兜底失败: ${String(ae.message).slice(0, 120)}`);
+      }
+      if (ar) {
+        dbg(`✓ 存档命中: ${brief(ar)}`);
+        feedback(ar);
+        emitFetchResult(ar, maxChars);
+        return;
+      }
+    }
     // 直连失败 + 兜底不可用:区分原因 —— HTTP 错误且非反爬 = 页面真负;反爬(403/验证码)/网络错误 = 中性
     if (isHttpError(e.message) && !isAntiBot(e.message)) feedbackEmpty();
     // P0-1 错误归因:浏览器已装却报"未安装"是误导 —— 按 resolveChromiumPath 分诊,
@@ -256,13 +257,13 @@ export async function runFetch(url, maxChars) {
     const browserHint = browserErr ? `(最后错误: ${browserErr.message.slice(0, 120)})` : `(原因: ${getLastBrowserFailure() || "浏览器返回空"})`;
     if (resolveChromiumPath()) {
       throw new Error(
-        `直连/存档/浏览器兜底均失败。已安装 Chromium 但未取得页面 ${browserHint};` +
+        `直连/浏览器/存档兜底均失败。已安装 Chromium 但未取得页面 ${browserHint};` +
           `常见原因:目标站 Cloudflare Turnstile/人机验证无法通过(${anti?.label || "未知"})、当前 IP 被站点封锁、或页面需要登录。` +
           `建议:更换网络出口 IP,或手动浏览器访问 ${url} 查看`,
       );
     }
     throw new Error(
-      `直连/存档/浏览器兜底均失败。未检测到 Chromium,无法启用浏览器兜底(直连错误: ${e.message})。` +
+      `直连/浏览器/存档兜底均失败。未检测到 Chromium,无法启用浏览器兜底(直连错误: ${e.message})。` +
         `建议: pkg install x11-repo && pkg install chromium 启用浏览器兜底`,
     );
   }

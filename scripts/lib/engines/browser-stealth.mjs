@@ -17,11 +17,25 @@
  */
 export const STEALTH_INIT_SCRIPT = `
 (() => {
-  // 1. 自动化特征:navigator.webdriver
+  // 1. 自动化特征:navigator.webdriver + window.webdriver(部分站查 window 而非 navigator)
   try { Object.defineProperty(Navigator.prototype, "webdriver", { get: () => undefined }); } catch {}
+  try { Object.defineProperty(window, "webdriver", { get: () => undefined }); } catch {}
 
-  // 2. 真人浏览器常态(语言/插件/chrome 运行时)
+  // 2. 真人浏览器常态(语言/插件/chrome 运行时/硬件指纹)
   try { Object.defineProperty(navigator, "languages", { get: () => ["zh-CN", "zh", "en-US", "en"] }); } catch {}
+  try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 }); } catch {}
+  try { Object.defineProperty(navigator, "deviceMemory", { get: () => 8 }); } catch {}
+  try { Object.defineProperty(navigator, "maxTouchPoints", { get: () => 0 }); } catch {}
+  try {
+    Object.defineProperty(navigator, "connection", {
+      get: () => ({ effectiveType: "4g", rtt: 50, downlink: 10, saveData: false }),
+    });
+  } catch {}
+  // outerWidth/Height 与视口一致(库模式 viewport 1366x768;不一致是 headless 特征)
+  try {
+    Object.defineProperty(window, "outerWidth", { get: () => 1366 });
+    Object.defineProperty(window, "outerHeight", { get: () => 768 });
+  } catch {}
   try {
     const plugins = [
       { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer", description: "Portable Document Format" },
@@ -32,11 +46,39 @@ export const STEALTH_INIT_SCRIPT = `
       try { Object.defineProperty(p, "length", { get: () => 1 }); p[0] = p; } catch {}
     }
     Object.defineProperty(navigator, "plugins", { get: () => plugins });
+    // PluginArray 原型:部分检测用 instanceof PluginArray 判别爬虫
+    try { Object.setPrototypeOf(plugins, PluginArray.prototype); } catch {}
+    Object.defineProperty(navigator, "mimeTypes", {
+      get: () => {
+        const mt = [{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }];
+        try { Object.setPrototypeOf(mt, MimeTypeArray.prototype); } catch {}
+        return mt;
+      },
+    });
   } catch {}
   try {
-    window.chrome = window.chrome || { runtime: {}, loadTimes: () => ({}), csi: () => ({}), app: { isInstalled: false } };
+    window.chrome = window.chrome || {};
+    window.chrome.runtime = { id: "kmendfapggjehodndflmmgagdbamhnfd", connect: () => ({}), sendMessage: () => {} };
+    window.chrome.csi = () => ({ startE: Date.now(), onloadT: Date.now(), pageT: 120, tran: 15 });
+    window.chrome.loadTimes = () => ({
+      requestTime: Date.now() / 1000,
+      startLoadTime: Date.now() / 1000,
+      commitLoadTime: Date.now() / 1000,
+      finishDocumentLoadTime: Date.now() / 1000,
+      finishLoadTime: Date.now() / 1000,
+      firstPaintTime: Date.now() / 1000,
+      navigationType: "Other",
+    });
+    window.chrome.app = { isInstalled: false };
   } catch {}
-  try { navigator.permissions.query = (p) => Promise.resolve({ state: "granted", onchange: null }); } catch {}
+  // permissions:站外页真人对通知/定位默认 prompt,摄像头等 denied(全 granted 反而可疑)
+  try {
+    navigator.permissions.query = (p) => {
+      const name = (p && p.name) || "unknown";
+      const state = /notifications|geolocation|push|clipboard/.test(name) ? "prompt" : "denied";
+      return Promise.resolve({ state, onchange: null });
+    };
+  } catch {}
 
   // 3. Canvas 指纹噪声:toDataURL/toBlob 前对画布像素做极轻微扰动,
   //    使每次绘制的指纹结果都不同(破坏跨站指纹唯一性)

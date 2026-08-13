@@ -214,6 +214,16 @@ export async function embedTexts(texts, { quiet = false } = {}) {
   return out;
 }
 
+/** 显式 L2 归一化:不信任提供商一定返回归一化向量(本地 WASM 用 normalize:true,
+ *  API 无此保证)。幂等(已归一化向量不变);零向量保持原样防 NaN。 */
+function normalizeL2(v) {
+  let sq = 0;
+  for (const x of v) sq += x * x;
+  const len = Math.sqrt(sq);
+  if (!len) return v;
+  return v.map((x) => x / len);
+}
+
 /**
  * API 嵌入(OpenAI 兼容 /v1/embeddings,批量一次请求)。
  * 韧性:429/5xx/网络错误退避重试(最多 3 次);连续失败进入冷却(见 apiCooling);
@@ -254,7 +264,7 @@ export async function apiEmbedTexts(texts, {
       if (res.ok) {
         const j = await res.json();
         if (!j.data?.length) throw new Error("API 返回空数据");
-        const out = j.data.map((d) => d.embedding || []);
+        const out = j.data.map((d) => normalizeL2(d.embedding || []));
         apiCooldown.mark(API_KEY, true); // 成功清零
         if (!quiet && currentEmbedBackend() !== "api") {
           console.error(`[info] 语义嵌入使用 API 后端(${model}, ${out[0]?.length || 0} 维)`);
