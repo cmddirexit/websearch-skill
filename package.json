@@ -23,7 +23,7 @@
     "test:all": "node --test \"scripts/lib/tests/**/*.test.mjs\""
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.15"
   },
   "license": "MIT",
   "optionalDependencies": {

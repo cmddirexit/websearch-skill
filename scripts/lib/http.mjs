@@ -19,6 +19,7 @@ import {
 } from "./config.mjs";
 import { httpGetViaImpersonate, isTlsFallbackCandidate } from "./tls.mjs";
 import { atomicWriteJsonSync } from "./state-file.mjs";
+import { validateFetchUrl } from "./url-safety.mjs";
 
 // re-export 保持 index.mjs 兼容(外部仍可从 "./http.mjs" 拿 REQ_HEADERS)
 export { REQ_HEADERS };
@@ -37,6 +38,9 @@ export function computeRateLimitDelay(last, now, minInterval = DOMAIN_RATE_LIMIT
  * 同域限速:同 host 的请求严格串行化,后一个在前一个完成后按间隔等待。
  * 用 per-host promise 链实现原子性,并发同域请求不会同时通过检查(否则限速失效)。
  */
+/** lastRequestAt 上限:库模式长跑下同域限速记忆 Map 只增不减,超限清理最旧条目 */
+const MAX_HOST_STATE = 2000;
+
 async function waitForRateLimit(url) {
   const host = new URL(url).host;
   const prev = pendingHosts.get(host) || Promise.resolve();
@@ -46,7 +50,16 @@ async function waitForRateLimit(url) {
     lastRequestAt.set(host, Date.now());
   });
   // 链尾吞错,防止某个请求失败导致后续请求永远等不到(链内逻辑不会 reject,防御性处理)
-  pendingHosts.set(host, next.catch(() => {}));
+  const chained = next.catch(() => {});
+  pendingHosts.set(host, chained);
+  // 链完成后清理:该 host 无新请求排队时移除链尾,防 Map 无限膨胀(库模式长跑)
+  chained.finally(() => {
+    if (pendingHosts.get(host) === chained) pendingHosts.delete(host);
+  });
+  // lastRequestAt 只增不减 → 超限清理最旧(限速记忆,偶尔漏一次无害)
+  if (lastRequestAt.size > MAX_HOST_STATE) {
+    lastRequestAt.delete(lastRequestAt.keys().next().value);
+  }
   await next;
 }
 
@@ -194,6 +207,15 @@ async function tryTlsFallback(err, url, headers, timeoutMs) {
   return out.body;
 }
 
+/** 重定向后地址二次校验:fetch 的 redirect:follow 会静默跟随重定向,攻击者可让公网 URL
+ * 302 到内网/本地地址,绕过调用方对初始 URL 的校验(盲 SSRF)。此处用同一校验器
+ * (url-safety.mjs)拦下非公网/带凭据/非 http(s) 的最终落地地址。属于事后校验:
+ * 请求已发出但响应被拒,攻击者拿不到内网内容,残余探测风险大幅降低。 */
+function assertSafeFinalUrl(originalUrl, finalUrl) {
+  if (!finalUrl || finalUrl === originalUrl) return; // 未发生重定向
+  validateFetchUrl(finalUrl);
+}
+
 /**
  * GET 请求返回文本。
  * @param {string} url
@@ -220,6 +242,7 @@ export async function httpGet(url, { timeoutMs = HTTP_TIMEOUT_MS, headers = REQ_
       } catch { /* body 不可读(连接中断等)则忽略 */ }
       throw e;
     }
+    assertSafeFinalUrl(url, res.url || url);
     updateCookieJarForResponse(res.url || url, res.headers.getSetCookie?.() || []);
     persistCookieJar();
     return await res.text();
@@ -252,6 +275,7 @@ export async function httpGetFull(url, { timeoutMs = HTTP_FULL_TIMEOUT_MS, heade
       } catch { /* body 不可读则忽略 */ }
       throw e;
     }
+    assertSafeFinalUrl(url, res.url || url);
     updateCookieJarForResponse(res.url || url, res.headers.getSetCookie?.() || []);
     persistCookieJar();
     const body = await res.text();

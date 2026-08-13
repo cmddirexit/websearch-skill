@@ -3,6 +3,7 @@
  *
  * 特点:与通用搜索重叠极低;技术查询的"项目/源码"维度(通用引擎给教程/文档,它给可运行仓库)。
  * 匿名 rate limit 10 次/分钟:聚合一次消耗 1 次,足够;超限失败不影响聚合(由调用方静默跳过)。
+ * 可配 GITHUB_TOKEN(或 GH_TOKEN)提升限流(认证后 30 次/分钟)。
  *
  * API: https://api.github.com/search/repositories?q=&per_page=&sort=stars
  */
@@ -35,11 +36,17 @@ export async function searchGithub(query, limit) {
 /** 单次 GitHub 查询(候选词) */
 async function trySearchGithub(query, limit) {
   const perPage = Math.min(limit || 10, 50);
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
   try {
     const url = `${GH_API}?q=${encodeURIComponent(query)}&per_page=${perPage}&sort=stars&order=desc`;
     // 统一走 httpGetJson:同域限速/Cookie/超时(HTTP_TIMEOUT_MS)由 http.mjs 管理
+    // 配置 GITHUB_TOKEN 提升匿名 10 req/min 的限额(认证 30 req/min)
     const j = await httpGetJson(url, {
-      headers: { Accept: "application/vnd.github+json", "User-Agent": "WebSearchSkill/1.0" },
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "WebSearchSkill/1.0",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
     });
     const items = j?.items || [];
     if (items.length === 0) {
@@ -61,7 +68,8 @@ async function trySearchGithub(query, limit) {
   } catch (e) {
     const m = (e.message || e).toString();
     // 403=rate limit 耗尽,429=限流:给明确原因
-    const msg = /HTTP 403/.test(m) ? "GitHub API 限额(匿名 10 req/min),稍后再试" : m.slice(0, 100);
+    const limitHint = token ? "GitHub API 限额(认证 30 req/min)" : "GitHub API 限额(匿名 10 req/min,可配 GITHUB_TOKEN 提升)";
+    const msg = /HTTP 403/.test(m) ? `${limitHint},稍后再试` : m.slice(0, 100);
     return { engine: "github", mode: "direct", blocked: true, reason: msg, results: [] };
   }
 }

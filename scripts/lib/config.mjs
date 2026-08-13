@@ -283,3 +283,7 @@ export const BAYES_MIN_CLASS_SAMPLES = envNumber("WEBSEARCH_BAYES_MIN_CLASS_SAMP
 export const BAYES_TOP_K = envNumber("WEBSEARCH_BAYES_TOP_K", 15);
 /** 预测低质概率阈值:超过才产出弱负证据 */
 export const BAYES_PREDICT_THR = 0.65;
+/** 事件去重账本上限:超限 FIFO 裁剪最旧(去重只需覆盖近期样本,防 Set 无限膨胀) */
+export const BAYES_MAX_EVENTS = envNumber("WEBSEARCH_BAYES_MAX_EVENTS", 10000);
+/** token 字典上限:超限淘汰最低频 token(总计数最小,信息量最低) */
+export const BAYES_MAX_TOKENS = envNumber("WEBSEARCH_BAYES_MAX_TOKENS", 20000);

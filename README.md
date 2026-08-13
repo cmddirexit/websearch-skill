@@ -20,7 +20,7 @@
 
 ## 环境要求
 
-- Node.js 18 或更高版本
+- Node.js 22.15 或更高版本(依赖 `module.registerHooks`、`Headers.getSetCookie`、`import.meta.resolve` 等较新 API)
 - npm
 - Chromium 可选；只在浏览器渲染和强反爬兜底时需要
 
@@ -178,6 +178,11 @@ export SILICONFLOW_API_KEY="..."
 
 `.env.json` 已被 Git 忽略。建议把文件权限设为 `0600`。
 
+> **隐私提示**:配置 `SILICONFLOW_API_KEY` 后,默认 `semantic.backend=auto` 会把**每次搜索的
+> 查询词与结果标题/摘要发送到嵌入 API**(默认硅基流动)做向量化;此外 `fetch` 正文提取的
+> 学习链路还会把**网页正文前 600 字**发送给嵌入 API 做标题-正文一致性判断。若不想把搜索
+> 或正文内容外传,将 `semantic.backend` 设为 `local`/`wasm`(本地模型)或 `off`(短语聚类,零外部依赖)。
+
 外部 LLM 判断默认关闭。启用时必须明确 provider，并通过对应环境变量提供密钥：
 
 | Provider | 密钥环境变量 |
@@ -215,6 +220,7 @@ export SILICONFLOW_API_KEY="..."
 | `WEBSEARCH_DEBUG` | `0` | 输出抓取与降级决策日志 |
 | `WEBSEARCH_TLS_FALLBACK` | `1` | 启用 TLS 指纹兜底 |
 | `SEARX_INSTANCE` | 公共实例 | 自定义 SearXNG 地址 |
+| `GITHUB_TOKEN` | 无 | GitHub 引擎认证 token(`GH_TOKEN` 亦可),把匿名 10 次/分钟提到 30 次/分钟 |
 
 更多算法阈值属于维护者参数，集中在 `scripts/lib/config.mjs`，不进入用户配置文件。
 
