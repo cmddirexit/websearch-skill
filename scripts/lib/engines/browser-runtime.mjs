@@ -75,10 +75,32 @@ export function resolveChromiumPath() {
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
   ];
-  for (const path of candidates) {
-    if (existsSync(path)) {
-      cachedChromiumPath = path;
-      return cachedChromiumPath;
+  // Playwright / Puppeteer 本地缓存的 Chromium(桌面 Linux 常见安装形态,
+  // 不在 PATH 也不在系统路径,不探测就永远"未检测到 Chromium")
+  const home = process.env.HOME || "";
+  const pwCaches = [
+    `${home}/.cache/ms-playwright`,
+    `${home}/.cache/puppeteer`,
+    process.env.PLAYWRIGHT_BROWSERS_PATH || "",
+    process.env.PUPPETEER_CACHE_DIR || "",
+  ].filter(Boolean);
+  for (const cache of pwCaches) {
+    if (!existsSync(cache)) continue;
+    let entries = [];
+    try {
+      entries = readdirSync(cache, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || !/chrom/i.test(e.name)) continue;
+      for (const rel of ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium", "chrome-win64/chrome.exe", "chrome/chrome"]) {
+        const p = join(cache, e.name, rel);
+        if (existsSync(p)) {
+          cachedChromiumPath = p;
+          return cachedChromiumPath;
+        }
+      }
     }
   }
   for (const dir of (process.env.PATH || "").split(":")) {

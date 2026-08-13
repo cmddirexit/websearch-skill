@@ -81,16 +81,44 @@ export function normalizeUrl(raw) {
  * @returns {Promise<{engine:string, mode:"aggregate", results:Array, sources:Array<string>, counts:Object, blocked:boolean}>}
  */
 export async function aggregateSearch(engines, query, limit, partners, deadline, opts) {
-  // 查询语言过滤:含 CJK → 中文查询(跳过 enOnly);纯 ASCII → 英文查询(跳过 zhOnly)
+  // 查询语言过滤:含 CJK → 中文查询(跳过 enOnly);纯 ASCII → 英文查询(跳过 zhOnly,
+  // 但记录被跳过的 zhOnly 引擎,供下方"英文引擎全部失败时降级纳入中文引擎"使用)
   const isZh = /[\u4e00-\u9fff]/.test(query);
-  let filtered = partners.filter((key) => {
+  const zhOnlyExcluded = [];
+  let filtered = partners.filter((key, idx) => {
     const eng = engines[key];
     if (!eng) return true; // 未注册引擎保留(由下方任务报错)
+    if (idx === 0) return true; // 主引擎(显式 --engine 或配置默认)不受语言过滤:用户选择必须生效
     if (isZh && eng.enOnly) return false;
-    if (!isZh && eng.zhOnly) return false;
+    if (!isZh && eng.zhOnly) {
+      zhOnlyExcluded.push(key);
+      return false;
+    }
     return true;
   });
   if (filtered.length === 0) filtered = partners; // 全部被语言过滤(理论上不可能,bing 通用) → 保底
+  let noteFallback = "";
+  // 单引擎任务:请求 → 解析 → blocked 包装 → 失败记忆(主 pass 与降级 pass 共用)
+  const runEngine = (key, perEngine) => {
+    const eng = engines[key];
+    if (!eng) return Promise.resolve({ key, results: [], error: `未注册引擎 ${key}` });
+    if (isEngineCooled(key)) return Promise.resolve({ key, results: [], error: "连续失败已进入冷却期,跳过" });
+    const remain = deadline - Date.now();
+    if (remain <= 0) return Promise.resolve({ key, results: [], error: "预算耗尽" });
+    return withBudget(eng.search(query, perEngine, opts), Math.min(remain, PER_ENGINE_TIMEOUT_MS), key)
+      .then((r) => {
+        if (!r || r.blocked) {
+          markEngineOutcome(key, false); // 失败记忆:连续失败进入冷却
+          return { key, results: [], error: r?.reason || "blocked" };
+        }
+        markEngineOutcome(key, true);
+        return { key, results: r.results || [] };
+      })
+      .catch((e) => {
+        markEngineOutcome(key, false);
+        return { key, results: [], error: (e.message || e).slice(0, 80) };
+      });
+  };
   // TCP 连通性预检:不通的引擎直接跳过,不再发起搜索请求(如 CN 网络下 api.github.com
   // 连接超时,每次聚合都等满单引擎超时;预检 2s 并发探测,总耗时 ≈ 探测超时)。
   // 探测失败计入失败记忆(连续 2 次进冷却),避免每次搜索重复探测。
@@ -116,30 +144,7 @@ export async function aggregateSearch(engines, query, limit, partners, deadline,
     const pageLimit = engines[key]?.pageLimit || ENGINE_PAGE_LIMIT;
     return Math.min(pageLimit, Math.max(Math.ceil(limit / filtered.length), Math.min(ENGINE_PAGE_LIMIT, limit)));
   });
-  const tasks = filtered.map(async (key, i) => {
-    const perEngine = targets[i];
-    const eng = engines[key];
-    if (!eng) return { key, results: [], error: `未注册引擎 ${key}` };
-    if (isEngineCooled(key)) return { key, results: [], error: "连续失败已进入冷却期,跳过" };
-    const remain = deadline - Date.now();
-    if (remain <= 0) return { key, results: [], error: "预算耗尽" };
-    try {
-      // 单引擎受“全局剩余预算”与“单引擎独立上限”双约束:慢引擎(原生 fetch 无
-      // 超时/网络不稳)挂起时快速放弃,不让它拖满 TOTAL_BUDGET_MS 拖慢聚合
-      // (底层浏览器进程由自身超时/进程树清理兜底)
-      const budget = Math.min(remain, PER_ENGINE_TIMEOUT_MS);
-      const r = await withBudget(eng.search(query, perEngine, opts), budget, key);
-      if (!r || r.blocked) {
-        markEngineOutcome(key, false); // 失败记忆:连续失败进入冷却
-        return { key, results: [], error: r?.reason || "blocked" };
-      }
-      markEngineOutcome(key, true);
-      return { key, results: r.results || [] };
-    } catch (e) {
-      markEngineOutcome(key, false);
-      return { key, results: [], error: (e.message || e).slice(0, 80) };
-    }
-  });
+  const tasks = filtered.map((key, i) => runEngine(key, targets[i]));
   const settled = await Promise.allSettled(tasks);
   const buckets = new Map(); // key → results
   const counts = {}; // 聚合信息:key → {fetched, kept}
@@ -156,6 +161,32 @@ export async function aggregateSearch(engines, query, limit, partners, deadline,
     buckets.set(key, results);
     counts[key] = { fetched: results.length, kept: 0 };
   });
+  // 英文查询降级:英文引擎全部失败/不可达时,把被语言过滤跳过的中文引擎(baidu/sogou/
+  // so360…)纳入补充抓取 —— CN 网络下 marginalia/hn/github/wikipedia 常被墙、bing 英文
+  // 结果被地域劫持,百度等实际能返回英文结果,比整体判失败可用得多。结果仍是英文+中文
+  // 混合,由调用方(聚类/排序)按需处理。
+  if (buckets.size === 0 && !isZh && zhOnlyExcluded.length > 0) {
+    const fbTarget = Math.max(Math.ceil(limit / zhOnlyExcluded.length), Math.min(ENGINE_PAGE_LIMIT, limit));
+    const fbSettled = await Promise.allSettled(zhOnlyExcluded.map((key) => runEngine(key, fbTarget)));
+    const fbEngines = [];
+    fbSettled.forEach((s) => {
+      if (s.status !== "fulfilled" || !s.value) return;
+      const { key, results, error } = s.value;
+      if (error) {
+        errors.push(`${key}:${error}`);
+        return;
+      }
+      if (results.length > 0) {
+        buckets.set(key, results);
+        counts[key] = { fetched: results.length, kept: 0 };
+        fbEngines.push(key);
+      }
+    });
+    if (fbEngines.length > 0) {
+      filtered = [...filtered, ...fbEngines]; // 并入合并循环,保证结果被去重合并输出
+      noteFallback = `英文引擎全部失败,降级纳入中文引擎(${fbEngines.join("+")})`;
+    }
+  }
   if (buckets.size === 0) {
     return {
       engine: partners[0], mode: "aggregate", blocked: true,
@@ -196,7 +227,7 @@ export async function aggregateSearch(engines, query, limit, partners, deadline,
     results: merged.slice(0, limit),
     sources: partners.filter((k) => counts[k]?.fetched > 0),
     counts,
-    note: note ? `多引擎聚合: ${note}` : "",
+    note: noteFallback ? `${noteFallback}${note ? `; ${note}` : ""}` : (note ? `多引擎聚合: ${note}` : ""),
     // 聚合后的结果已含各引擎自己的 blocked 处理;若主引擎直连失败但补充引擎成功,
     // 记录用于降级提示(不阻塞)
     _errors: errors,
