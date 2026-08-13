@@ -26,6 +26,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./state-file.mjs";
 import {
   CACHE_DIR, BAYES_MIN_SAMPLES, BAYES_MIN_CLASS_SAMPLES, BAYES_TOP_K, BAYES_PREDICT_THR,
+  BAYES_MAX_EVENTS, BAYES_MAX_TOKENS,
 } from "./config.mjs";
 import { cnBigrams, enWords } from "./rep-features.mjs";
 import { clamp } from "./rep-score.mjs";
@@ -48,6 +49,7 @@ export function bodyTokens(text, maxChars = 1600) {
  */
 export function createContentBayes({ file = BAYES_FILE } = {}) {
   let counts = {}; // token -> {g: 正常计数, b: 低质计数}
+  let tokenCount = 0;   // counts 条目数(维护计数,避免频繁 Object.keys)
   let samples = 0;      // 有效样本数(置信度加权)
   let goodSamples = 0;
   let badSamples = 0;
@@ -59,13 +61,14 @@ export function createContentBayes({ file = BAYES_FILE } = {}) {
       const j = JSON.parse(readFileSync(file, "utf8"));
       if (j.version !== SCHEMA_VERSION) return;
       counts = j.counts || {};
+      tokenCount = Object.keys(counts).length;
       samples = j.samples || 0;
       goodSamples = j.goodSamples || 0;
       badSamples = j.badSamples || 0;
       eventIds = new Set(j.eventIds || []);
     } catch {
       // 损坏则从零开始(同 domain-rep 哲学:宁可冷启动,不用污染数据)
-      counts = {}; samples = 0; goodSamples = 0; badSamples = 0; eventIds = new Set();
+      counts = {}; tokenCount = 0; samples = 0; goodSamples = 0; badSamples = 0; eventIds = new Set();
     }
   }
 
@@ -110,13 +113,31 @@ export function createContentBayes({ file = BAYES_FILE } = {}) {
       .digest("hex").slice(0, 16);
     if (eventIds.has(id)) return false;
     eventIds.add(id);
+    // 事件账本 FIFO 裁剪:去重只需覆盖近期样本,防 Set 无限膨胀(同 domain-rep 的 META_MAX_EVENTS 哲学)
+    if (eventIds.size > BAYES_MAX_EVENTS) {
+      const it = eventIds.values();
+      for (let n = eventIds.size - BAYES_MAX_EVENTS; n > 0; n--) eventIds.delete(it.next().value);
+    }
     samples += w;
     if (bad) badSamples += w; else goodSamples += w;
     for (const t of tokens) {
-      counts[t] = counts[t] || { g: 0, b: 0 };
+      if (!counts[t]) { counts[t] = { g: 0, b: 0 }; tokenCount++; }
       if (bad) counts[t].b += w; else counts[t].g += w;
     }
+    if (tokenCount > BAYES_MAX_TOKENS) pruneCounts();
     return true;
+  }
+
+  /** 淘汰最低频 token(总计数最小),删到上限 90% 留缓冲,避免每次 learn 都排序。
+   * 低频 token 对 Paul Graham 合成几乎无贡献(预测取最极端 TOP_K),删除无副作用。 */
+  function pruneCounts() {
+    const entries = Object.entries(counts);
+    entries.sort((a, b) => (a[1].g + a[1].b) - (b[1].g + b[1].b));
+    const keep = Math.floor(BAYES_MAX_TOKENS * 0.9);
+    for (const [t] of entries.slice(0, Math.max(0, entries.length - keep))) {
+      delete counts[t];
+      tokenCount--;
+    }
   }
 
   /**

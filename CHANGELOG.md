@@ -9,6 +9,19 @@
 - 修复英文正文词界和中文正文 60 字符截断；v1 状态保守冷启动并持久化完整去重 ID
 - archive 仅在所有镜像均为基础设施故障时累计全局冷却
 
+## Unreleased — 安全与资源泄漏修复
+
+- **SSRF 重定向校验**:直连 fetch 拿到最终落地地址后二次校验,拦截公网 URL 302 到
+  内网/本地/带凭据地址(盲 SSRF);公网→公网重定向不受影响
+- **同域限速状态清理**:`pendingHosts` 链完成自动移除、`lastRequestAt` 超 2000 条
+  清最旧,库模式长跑不再无限膨胀
+- **content-bayes 账本上限**:事件去重 ID FIFO 裁剪(默认 10000)、token 字典淘汰
+  最低频(默认 20000),与 domain-rep 的 META_MAX_EVENTS 哲学对齐
+- **GitHub 引擎认证**:支持 `GITHUB_TOKEN`/`GH_TOKEN` 提升匿名 10 req/min 限额
+- **异常路径释放浏览器**:CLI 入口 catch 分支同样 closeBrowser,防 chromium 残留
+- **Node 版本声明修正**:`>=18` → `>=22.15`(实际依赖 module.registerHooks 等)
+- **README 隐私提示**:补充 fetch 正文学习链路会把网页正文前 600 字发给嵌入 API
+
 ## 1.4.0 — fetch 兜底链提速
 
 > commit `c358a30`
